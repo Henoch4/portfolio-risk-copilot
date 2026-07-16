@@ -1,0 +1,51 @@
+{
+  "agent_id": "portfolio-risk-copilot",
+  "name": "Portfolio Risk Copilot",
+  "version": "0.1.0",
+  "description": "Read-only risk audit of a connected OKX trading account: concentration risk, leverage risk, and smart-money positioning divergence. Does not audit third-party wallet addresses and cannot place, cancel, or transfer anything.",
+  "capabilities": ["portfolio.audit", "risk.score"],
+  "permissions_required": ["read_only"],
+  "permissions_blocked": ["trade", "withdraw", "transfer"],
+  "hire_endpoint": "https://<REPLACE-WITH-YOUR-DEPLOYED-HOST>/hire",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "mode": {
+        "type": "string",
+        "enum": ["own_account"],
+        "default": "own_account",
+        "description": "Only own_account is supported — this ASP audits the account it is authenticated as, never an arbitrary wallet address."
+      },
+      "profile_mode": {
+        "type": "string",
+        "enum": ["demo", "live"],
+        "default": "demo",
+        "description": "live requires ALLOW_LIVE=true on the deployment (disabled by default for safety)."
+      },
+      "profile": {
+        "type": ["string", "null"],
+        "description": "API-key profile name from ~/.okx/config.toml, if using API-key auth instead of OAuth."
+      },
+      "inst_type": {
+        "type": ["string", "null"],
+        "enum": ["SWAP", "FUTURES", "OPTION", null],
+        "description": "Optional filter for the leverage/positions check."
+      }
+    },
+    "required": []
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "audit_id": { "type": "string" },
+      "mode": { "type": "string" },
+      "authenticated": { "type": "boolean" },
+      "risk_score": { "type": "number" },
+      "flags": { "type": "array" },
+      "report_md": { "type": "string" },
+      "needs_human_review": { "type": "boolean" },
+      "error": { "type": ["string", "null"] }
+    }
+  },
+  "sla_ms": 15000
+}

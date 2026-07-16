@@ -1,0 +1,15 @@
+# Python dependencies for the FastAPI service only.
+#
+# The OKX CLI (@okx_ai/okx-trade-cli) is an npm package, not a Python
+# package — it is NOT listed here on purpose. See SETUP.md for how to
+# install it. If `pip install -r requirements.txt` is all anyone runs,
+# the app will still fail at runtime with a clear error until the `okx`
+# binary is also installed and on PATH.
+
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.29,<1.0
+pydantic>=2.6,<3.0
+
+# Testing only (not needed to run the service itself)
+pytest>=8.0
+pytest-asyncio>=0.23
