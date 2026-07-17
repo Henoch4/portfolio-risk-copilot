@@ -6,7 +6,7 @@
   "capabilities": ["portfolio.audit", "risk.score"],
   "permissions_required": ["read_only"],
   "permissions_blocked": ["trade", "withdraw", "transfer"],
-  "hire_endpoint": "https://portfolio-risk-copilot.onrender.com/",
+  "hire_endpoint": "https://portfolio-risk-copilot.onrender.com/hire",
   "input_schema": {
     "type": "object",
     "properties": {
