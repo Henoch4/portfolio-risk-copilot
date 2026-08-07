@@ -1,0 +1,46 @@
+{
+  "name": "autonomous-trading-agent",
+  "description": "Autonomous AI trading agent with onchain audit trail — Build X AI Season Hackathon 2026",
+  "version": "0.1.0",
+  "category": "Finance",
+  "endpoints": [
+    {
+      "path": "/hire",
+      "method": "POST",
+      "description": "Run a trading cycle: analyze market → generate signal → pass risk checks → execute → log onchain"
+    },
+    {
+      "path": "/manifest",
+      "method": "GET",
+      "description": "Return the ASP manifest for okx.ai registration"
+    },
+    {
+      "path": "/health",
+      "method": "GET",
+      "description": "Health check"
+    },
+    {
+      "path": "/audit-decisions",
+      "method": "GET",
+      "description": "Query onchain audit trail for decisions and executions"
+    }
+  ],
+  "pricing": {
+    "model": "pay_per_use",
+    "price_usd": "0.50",
+    "currency": "USDT"
+  },
+  "permissions": [
+    "trade:execute",
+    "trade:place_order",
+    "trade:cancel_order"
+  ],
+  "capabilities": [
+    "market_analysis",
+    "signal_generation",
+    "risk_management",
+    "trade_execution",
+    "onchain_logging"
+  ],
+  "chain": "xlayer"
+}
