@@ -347,13 +347,13 @@ class OnchainLogger:
     def is_kill_switch_active(self) -> bool:
         return bool(self.contract.functions.killSwitchActive(self.agent_address).call())
 
-    def get_decision(self, decision_id: str) -> dict:
+     def get_decision(self, decision_id: str) -> dict:
         """Query a decision from the contract by ID."""
         decision_id_hash = Web.keccak(text=decision_id)
         try:
-            events = self.contract.events.DecisionLogged.get_logs(fromBlock=0)
+            events = self.contract.events.DecisionLogged.get_logs(from_block=0)
             for evt in events:
-                if evt["args"]["decisionId"] == decision_id_hash:
+                if evt["args"].get("decisionId") == decision_id_hash:
                     return dict(evt["args"])
         except Exception as e:
             logger.warning(f"Failed to query decision: {e}")
@@ -371,10 +371,12 @@ class OnchainLogger:
 
         try:
             decision_events = self.contract.events.DecisionLogged.get_logs(
-                fromBlock=from_block
+                from_block=from_block
             )
             for evt in decision_events:
-                decisions.append(dict(evt["args"]))
+                args = dict(evt["args"])
+                args.pop("indexing", None)  # remove non-serializable 'indexed' key
+                decisions.append(args)
         except Exception as e:
             logger.warning(f"Failed to query decisions: {e}")
 
