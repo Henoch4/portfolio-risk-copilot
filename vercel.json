@@ -2,7 +2,7 @@
   "version": 2,
   "builds": [
     {
-      "source": "src/main.py",
+      "src": "src/main.py",
       "use": "@vercel/python",
       "config": {
         "maxLambdaSize": "50mb"
@@ -11,12 +11,12 @@
   ],
   "routes": [
     {
-      "source": "/static/(.*)",
+      "src": "/static/(.*)",
       "headers": { "cache-control": "s-max-age=31536000,immutable" },
-      "serve": "/static/$1"
+      "continue": true
     },
     {
-      "source": "/(.*)",
+      "src": "/(.*)",
       "dest": "/src/main.py"
     }
   ],
