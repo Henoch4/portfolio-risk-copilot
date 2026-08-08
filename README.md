@@ -37,7 +37,7 @@ Portfolio-risk-copilot/
 │   ├── scripts/deploy.py                 # Python deploy script
 │   └── scripts/deploy.js                 # Hardhat deploy script
 ├── src/
-│   ├── main.py          # FastAPI: /hire, /trade, /audit-stats, /risk-stats
+│   ├── main.py          # FastAPI: /hire, /trade, /audit-stats, /risk-stats, /kill-switch
 │   ├── agent.py         # Multi-agent orchestrator
 │   ├── signals.py       # Signal: mean rev + momentum + funding
 │   ├── execution.py     # OrderExecutor + RiskGate (non-overridable)
@@ -46,7 +46,7 @@ Portfolio-risk-copilot/
 │   └── okx_cli.py       # OKX CLI wrapper
 ├── tests/
 │   ├── test_signals.py     # 15 signal tests
-│   ├── test_execution.py   # 12 risk gate tests
+│   ├── test_execution.py   # 20 risk gate tests (incl. kill switch)
 │   └── test_auditor.py     # 24 audit tests
 ├── scripts/
 │   ├── smoke_test.py            # Legacy audit smoke test
@@ -125,6 +125,7 @@ curl -X POST http://localhost:8000/hire \
 
 | Parameter | Default | Description |
 |---|---|---|
+| kill_switch | Inactive | Global halt (auto-triggers on daily loss breach) |
 | max_position_usd | $5,000 | Max per-trade position |
 | max_daily_loss_usd | $500 | Daily loss limit |
 | max_daily_trades | 10 | Daily trade count limit |
@@ -142,6 +143,8 @@ curl -X POST http://localhost:8000/hire \
 | Function | Visibility | Description |
 |---|---|---|
 | `setRiskParams()` | external | Set non-overridable risk params (can only tighten) |
+| `activateKillSwitch()` | external | Halt all trading from this agent |
+| `deactivateKillSwitch()` | external | Resume trading after kill switch |
 | `logDecision()` | external | Log a trade decision (requires signature + risk check) |
 | `recordExecution()` | external | Record post-trade execution receipt |
 | `getAgentDailyStats()` | view | Query daily stats for an agent |
@@ -150,6 +153,7 @@ curl -X POST http://localhost:8000/hire \
 ### Security Features
 - **Signature verification**: EIP-191 personal_sign on every decision
 - **Risk param enforcement**: Contract-level position/loss limits
+- **Kill switch**: Onchain + off-chain halt, auto-trigger on loss breach
 - **Tightening only**: Risk params can only become stricter
 - **No relayer bypass**: `onlyAgent` modifier prevents third-party calls
 

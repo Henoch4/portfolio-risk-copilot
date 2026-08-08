@@ -62,16 +62,21 @@ python scripts/smoke_test_trading.py
    - Ensemble combination with weighted voting
 
 3. **Risk Engine** (`src/execution.py` — RiskGate)
-   - Position size limits (non-overridable)
-   - Daily loss limits
-   - Daily trade count caps
-   - Asset allowlist
-   - Minimum confidence threshold
+    - Kill switch (global halt, auto-trigger on daily loss breach)
+    - Position size limits (non-overridable)
+    - Daily loss limits
+    - Daily trade count caps
+    - Asset allowlist
+    - Minimum confidence threshold
+    - Fat-finger price check (>20% deviation rejection)
+    - Price collar / slippage enforcement on limit orders
+    - Reduce-only enforcement (no flipping long→short)
 
 4. **Onchain Logger** (`src/audit_logger.py`)
-   - Signs decisions with EIP-191 (personal_sign)
-   - Submits to TradeAuditTrail.sol before execution
-   - Records fill/receipt after execution
+    - Signs decisions with EIP-191 (personal_sign)
+    - Submits to TradeAuditTrail.sol before execution
+    - Records fill/receipt after execution
+    - Onchain kill switch (mirrors off-chain gate)
 
 5. **Orchestrator** (`src/agent.py`)
    - Coordinates: Market Data → Signals → Risk → Onchain Log → Execute
@@ -129,7 +134,7 @@ Portfolio-risk-copilot/
 │   ├── scripts/deploy.js                 # Deployment script
 │   └── hardhat.config.mjs                # Hardhat config
 ├── src/
-│   ├── main.py          # FastAPI + /trade, /hire, /audit-stats endpoints
+│   ├── main.py          # FastAPI: /trade, /hire, /audit-stats, /risk-stats, /kill-switch endpoints
 │   ├── agent.py         # Multi-agent orchestrator
 │   ├── signals.py       # Signal generation engine
 │   ├── execution.py     # Order executor + RiskGate
@@ -138,7 +143,7 @@ Portfolio-risk-copilot/
 │   └── okx_cli.py       # OKX CLI wrapper
 ├── tests/
 │   ├── test_signals.py     # 15 signal tests
-│   ├── test_execution.py   # 12 risk gate tests
+│   ├── test_execution.py   # 20 risk gate tests (incl. kill switch, fat-finger, slippage, reduce-only)
 │   └── test_auditor.py     # 24 audit tests
 ├── scripts/
 │   ├── smoke_test.py            # Original audit smoke test
