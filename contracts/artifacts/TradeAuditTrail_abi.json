@@ -63,6 +63,50 @@
         "type": "address"
       },
       {
+        "indexed": false,
+        "internalType": "string",
+        "name": "reason",
+        "type": "string"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "timestamp",
+        "type": "uint256"
+      }
+    ],
+    "name": "KillSwitchActivated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "timestamp",
+        "type": "uint256"
+      }
+    ],
+    "name": "KillSwitchDeactivated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      },
+      {
         "components": [
           {
             "internalType": "uint256",
@@ -145,6 +189,19 @@
   {
     "inputs": [
       {
+        "internalType": "string",
+        "name": "reason",
+        "type": "string"
+      }
+    ],
+    "name": "activateKillSwitch",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "address",
         "name": "",
         "type": "address"
@@ -189,7 +246,7 @@
         "type": "address"
       }
     ],
-    "name": "dailyBlock",
+    "name": "dailyBucket",
     "outputs": [
       {
         "internalType": "uint256",
@@ -255,6 +312,13 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "deactivateKillSwitch",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -363,6 +427,11 @@
       {
         "internalType": "bool",
         "name": "executed",
+        "type": "bool"
+      },
+      {
+        "internalType": "bool",
+        "name": "isShort",
         "type": "bool"
       }
     ],
@@ -513,6 +582,11 @@
             "internalType": "bool",
             "name": "executed",
             "type": "bool"
+          },
+          {
+            "internalType": "bool",
+            "name": "isShort",
+            "type": "bool"
           }
         ],
         "internalType": "struct TradeAuditTrail.TradeDecision",
@@ -620,11 +694,54 @@
             "internalType": "bool",
             "name": "executed",
             "type": "bool"
+          },
+          {
+            "internalType": "bool",
+            "name": "isShort",
+            "type": "bool"
           }
         ],
         "internalType": "struct TradeAuditTrail.TradeDecision[]",
         "name": "",
         "type": "tuple[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "name": "killSwitchActive",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "name": "killSwitchReason",
+    "outputs": [
+      {
+        "internalType": "string",
+        "name": "",
+        "type": "string"
       }
     ],
     "stateMutability": "view",
@@ -697,6 +814,11 @@
             "internalType": "bytes",
             "name": "signature",
             "type": "bytes"
+          },
+          {
+            "internalType": "bool",
+            "name": "isShort",
+            "type": "bool"
           }
         ],
         "internalType": "struct TradeAuditTrail.DecisionInput",

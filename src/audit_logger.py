@@ -38,6 +38,7 @@ class DecisionPayload:
     size_usd: float
     risk_params_hash: str
     timestamp: int
+    is_short: bool = False
 
 
 # Compiled ABI from TradeAuditTrail.sol (via-ir)
@@ -68,11 +69,30 @@ _ABI = [
                     {"name": "sizeUsd", "type": "uint256"},
                     {"name": "riskHash", "type": "bytes32"},
                     {"name": "signature", "type": "bytes"},
+                    {"name": "isShort", "type": "bool"},
                 ],
             },
         ],
         "name": "logDecision",
         "outputs": [],
+        "type": "function",
+    },
+    {
+        "inputs": [{"name": "reason", "type": "string"}],
+        "name": "activateKillSwitch",
+        "outputs": [],
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "deactivateKillSwitch",
+        "outputs": [],
+        "type": "function",
+    },
+    {
+        "inputs": [{"name": "", "type": "address"}],
+        "name": "killSwitchActive",
+        "outputs": [{"name": "", "type": "bool"}],
         "type": "function",
     },
     {
@@ -256,6 +276,7 @@ class OnchainLogger:
             "sizeUsd": int(payload.size_usd * 1e8),
             "riskHash": risk_hash_bytes,
             "signature": signature,
+            "isShort": payload.is_short,
         }
 
         tx_data = self.contract.functions.logDecision(decision_input).build_transaction({
@@ -296,6 +317,35 @@ class OnchainLogger:
         self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
         logger.info(f"Execution recorded. Tx: {tx_hash.hex()}")
         return tx_hash.hex()
+
+    def activate_kill_switch(self, reason: str) -> str:
+        """Halt all onchain logDecision calls from this agent. Mirrors
+        RiskGate.activate_kill_switch — call both so the halt is enforced
+        even if only one layer is checked by a given caller."""
+        tx_data = self.contract.functions.activateKillSwitch(reason).build_transaction({
+            "chainId": self.chain_id,
+            "nonce": self.get_nonce(),
+        })
+        signed = self.w3.eth.account.sign_transaction(tx_data, self.private_key)
+        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+        self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+        logger.warning(f"Onchain kill switch activated: {reason}. Tx: {tx_hash.hex()}")
+        return tx_hash.hex()
+
+    def deactivate_kill_switch(self) -> str:
+        """Resume onchain trading. A deliberate, separate call."""
+        tx_data = self.contract.functions.deactivateKillSwitch().build_transaction({
+            "chainId": self.chain_id,
+            "nonce": self.get_nonce(),
+        })
+        signed = self.w3.eth.account.sign_transaction(tx_data, self.private_key)
+        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+        self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+        logger.info(f"Onchain kill switch deactivated. Tx: {tx_hash.hex()}")
+        return tx_hash.hex()
+
+    def is_kill_switch_active(self) -> bool:
+        return bool(self.contract.functions.killSwitchActive(self.agent_address).call())
 
     def get_decision(self, decision_id: str) -> dict:
         """Query a decision from the contract by ID."""

@@ -208,6 +208,10 @@ class TradeRequest(BaseModel):
     interval_seconds: int = Field(300, description="Interval for continuous mode")
 
 
+class KillSwitchRequest(BaseModel):
+    reason: str = Field(..., min_length=1, description="Why the kill switch is being activated")
+
+
 class AuditStatsRequest(BaseModel):
     days: int = Field(7, ge=1, le=30, description="Number of days to query")
 
@@ -221,6 +225,18 @@ async def trade(req: TradeRequest):
     transactions are sent. Set DRY_RUN=false and provide wallet credentials
     to enable live trading.
     """
+    # Short-circuit the whole cycle if the kill switch is active — every
+    # individual order would be rejected by risk_gate.check_order anyway,
+    # but there's no reason to spend a cycle generating signals and calling
+    # out to market data just to reject everything at the last step.
+    kill_status = _risk_gate.kill_switch_status()
+    if kill_status["active"]:
+        raise HTTPException(
+            423,
+            f"Kill switch is active: {kill_status['reason']}. "
+            f"Call POST /kill-switch/deactivate to resume.",
+        )
+
     try:
         result = await _trading_agent.run_trading_cycle(req.assets)
         return {
@@ -274,4 +290,50 @@ async def risk_stats():
         "max_daily_trades": _risk_gate.max_daily_trades,
         "max_leverage": _risk_gate.max_leverage,
         "min_confidence_bps": _risk_gate.min_confidence_bps,
+        "kill_switch": _risk_gate.kill_switch_status(),
     }
+
+
+@app.get("/kill-switch")
+async def kill_switch_status():
+    """Current kill switch status. Checks the off-chain gate; also checks the
+    onchain contract if configured, since either layer can independently halt
+    trading (see TradeAuditTrail.sol activateKillSwitch)."""
+    status = _risk_gate.kill_switch_status()
+    if _onchain_logger:
+        try:
+            status["onchain_active"] = _onchain_logger.is_kill_switch_active()
+        except Exception as e:
+            status["onchain_check_error"] = str(e)
+    return status
+
+
+@app.post("/kill-switch/activate")
+async def activate_kill_switch(req: KillSwitchRequest):
+    """Halt all trading immediately. Always activates the off-chain gate;
+    also activates onchain if the audit logger is configured, so the halt
+    holds even if a caller only checks one layer."""
+    _risk_gate.activate_kill_switch(req.reason)
+    result = {"status": "activated", "reason": req.reason, "onchain": None}
+    if _onchain_logger:
+        try:
+            tx_hash = _onchain_logger.activate_kill_switch(req.reason)
+            result["onchain"] = {"tx_hash": tx_hash}
+        except Exception as e:
+            result["onchain"] = {"error": str(e)}
+    return result
+
+
+@app.post("/kill-switch/deactivate")
+async def deactivate_kill_switch():
+    """Resume trading. A deliberate, separate call — this is never triggered
+    automatically, only the activation is (see RiskGate.report_loss)."""
+    _risk_gate.deactivate_kill_switch()
+    result = {"status": "deactivated", "onchain": None}
+    if _onchain_logger:
+        try:
+            tx_hash = _onchain_logger.deactivate_kill_switch()
+            result["onchain"] = {"tx_hash": tx_hash}
+        except Exception as e:
+            result["onchain"] = {"error": str(e)}
+    return result

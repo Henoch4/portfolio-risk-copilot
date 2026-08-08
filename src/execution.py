@@ -278,11 +278,59 @@ class RiskGate:
         self._daily_loss: dict[str, float] = {}
         self._daily_trade_count: dict[str, int] = {}
 
-    def check_order(self, order: OrderRequest, agent_id: str = "default") -> RiskCheckResult:
+        # --- Kill switch: global halt, independent of per-agent limits ---
+        # This is the one control nothing else in this file can substitute for —
+        # every other check runs per-order; this one halts the gate entirely,
+        # for every agent, until explicitly cleared.
+        self._kill_switch_active: bool = False
+        self._kill_switch_reason: str | None = None
+        self._kill_switch_activated_at: float | None = None
+
+    def activate_kill_switch(self, reason: str) -> None:
+        """Halt all order approval immediately. Requires explicit deactivation to resume."""
+        import time
+        self._kill_switch_active = True
+        self._kill_switch_reason = reason
+        self._kill_switch_activated_at = time.time()
+
+    def deactivate_kill_switch(self) -> None:
+        """Resume order approval. This is a deliberate, separate action — never automatic."""
+        self._kill_switch_active = False
+        self._kill_switch_reason = None
+        self._kill_switch_activated_at = None
+
+    def kill_switch_status(self) -> dict:
+        return {
+            "active": self._kill_switch_active,
+            "reason": self._kill_switch_reason,
+            "activated_at": self._kill_switch_activated_at,
+        }
+
+    def check_order(
+        self,
+        order: OrderRequest,
+        agent_id: str = "default",
+        current_price: float | None = None,
+        current_position_side: str | None = None,
+    ) -> RiskCheckResult:
         """
         Check an order against all risk parameters.
         Returns approved=True only if ALL checks pass.
+
+        current_price: latest market price, used to enforce the slippage/price-collar
+            check on limit orders. Without it, that check is skipped rather than
+            silently passed — see check 6 below.
+        current_position_side: "long" | "short" | None, used to enforce reduce-only
+            semantics on sell orders — see check 7 below.
         """
+        # 0. Kill switch — checked first, before anything else, no exceptions.
+        if self._kill_switch_active:
+            return RiskCheckResult(
+                approved=False,
+                code="KILL_SWITCH_ACTIVE",
+                reason=f"Kill switch is active: {self._kill_switch_reason}",
+            )
+
         # 1. Asset allowlist
         if order.inst_id not in self.allowed_assets:
             return RiskCheckResult(
@@ -331,20 +379,64 @@ class RiskGate:
                 ),
             )
 
-        # 5. Slippage check (for limit orders)
-        if order.order_type == "limit" and order.px:
-            try:
-                limit_px = float(order.px)
-                max_slippage = limit_px * (self.max_slippage_pct / 100)
-                # This is a simplified check — in production, fetch current market price
-                # and compare against the limit price
-            except (ValueError, TypeError):
-                pass
+        # 5. Fat-finger / price sanity check (independent of slippage, always runs)
+        try:
+            limit_px = float(order.px) if order.px else None
+        except (ValueError, TypeError):
+            limit_px = None
 
-        # 6. Reduce-only enforcement for short positions
-        if order.side == "sell" and not order.reduce_only:
-            # In production: check if this would create a short or if we have long position to reduce
-            pass
+        if limit_px is not None and current_price is not None and current_price > 0:
+            deviation_pct = abs(limit_px - current_price) / current_price * 100
+            if deviation_pct > 20.0:
+                return RiskCheckResult(
+                    approved=False,
+                    code="FAT_FINGER_REJECTED",
+                    reason=(
+                        f"Limit price {limit_px:.2f} deviates {deviation_pct:.1f}% "
+                        f"from current price {current_price:.2f} — rejected as a "
+                        f"likely input error, not a normal slippage case."
+                    ),
+                )
+
+        # 6. Slippage / price collar (for limit orders) — enforced, not stubbed.
+        # If we don't have a current market price to compare against, we reject
+        # rather than silently approve: an unenforceable check is not a check.
+        if order.order_type == "limit" and limit_px is not None:
+            if current_price is None or current_price <= 0:
+                return RiskCheckResult(
+                    approved=False,
+                    code="NO_PRICE_REFERENCE",
+                    reason=(
+                        "Limit order submitted without a current market price to "
+                        "check slippage against — cannot verify the price collar."
+                    ),
+                )
+            slippage_pct = abs(limit_px - current_price) / current_price * 100
+            if slippage_pct > self.max_slippage_pct:
+                return RiskCheckResult(
+                    approved=False,
+                    code="SLIPPAGE_EXCEEDED",
+                    reason=(
+                        f"Limit price {limit_px:.2f} is {slippage_pct:.2f}% away "
+                        f"from current price {current_price:.2f}, exceeding the "
+                        f"{self.max_slippage_pct:.2f}% collar."
+                    ),
+                )
+
+        # 7. Reduce-only enforcement — enforced, not stubbed.
+        # A sell order that would open or increase a short, rather than reduce
+        # an existing long, must be explicitly marked reduce_only=False by the
+        # caller and is otherwise rejected here.
+        if order.side == "sell" and current_position_side == "long" and not order.reduce_only:
+            return RiskCheckResult(
+                approved=False,
+                code="REDUCE_ONLY_VIOLATION",
+                reason=(
+                    "Sell order against an existing long position must set "
+                    "reduce_only=True — this gate does not allow flipping a "
+                    "position from long to short in a single unmarked order."
+                ),
+            )
 
         self._daily_trade_count[agent_id] = self._daily_trade_count.get(agent_id, 0) + 1
 
@@ -355,8 +447,22 @@ class RiskGate:
         )
 
     def report_loss(self, agent_id: str, loss_usd: float):
-        """Report a loss to the daily loss tracker."""
+        """Report a loss to the daily loss tracker.
+
+        Auto-trips the kill switch if this loss pushes the agent over its daily
+        loss limit — the design doc's fail-safe-defaults principle (Section 4)
+        says the system should default to reducing risk under uncertainty, not
+        just reject the next single order and otherwise carry on.
+        """
         self._daily_loss[agent_id] = self._daily_loss.get(agent_id, 0.0) + loss_usd
+        if self._daily_loss[agent_id] >= self.max_daily_loss_usd and not self._kill_switch_active:
+            self.activate_kill_switch(
+                reason=(
+                    f"Auto-triggered: agent {agent_id} daily loss "
+                    f"${self._daily_loss[agent_id]:.2f} reached limit "
+                    f"${self.max_daily_loss_usd:.2f}"
+                )
+            )
 
     def report_volume(self, agent_id: str, volume_usd: float):
         """Report executed volume to the daily tracker."""

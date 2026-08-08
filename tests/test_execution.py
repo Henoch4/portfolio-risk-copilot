@@ -71,7 +71,78 @@ class TestRiskGate:
         )
         result = gate.check_order(order, "agent1")
         assert result.approved is False
-        assert result.code == "DAILY_LOSS_LIMIT_EXCEEDED"
+        # A loss breach now auto-trips the kill switch (fail-safe default —
+        # see RiskGate.report_loss), which is checked first and is a stronger
+        # guarantee than the old per-order DAILY_LOSS_LIMIT_EXCEEDED check:
+        # it halts the agent globally, not just this one order.
+        assert result.code == "KILL_SWITCH_ACTIVE"
+
+    def test_daily_loss_breach_auto_trips_kill_switch(self):
+        gate = RiskGate(max_daily_loss_usd=500)
+        assert gate.kill_switch_status()["active"] is False
+        gate.report_loss("agent1", 600)
+        status = gate.kill_switch_status()
+        assert status["active"] is True
+        assert "agent1" in status["reason"]
+
+    def test_kill_switch_blocks_all_orders_until_deactivated(self):
+        gate = RiskGate(max_position_usd=5000)
+        order = OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="buy", order_type="market", size="100",
+        )
+        gate.activate_kill_switch("manual halt for testing")
+        result = gate.check_order(order, "agent1")
+        assert result.approved is False
+        assert result.code == "KILL_SWITCH_ACTIVE"
+
+        gate.deactivate_kill_switch()
+        result = gate.check_order(order, "agent1")
+        assert result.approved is True
+
+    def test_slippage_rejected_without_price_reference(self):
+        # A limit order's price-collar check must not silently pass when
+        # there's no current price to check it against.
+        gate = RiskGate(max_position_usd=5000)
+        order = OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="buy", order_type="limit", size="100", px="50000",
+        )
+        result = gate.check_order(order, "agent1")
+        assert result.approved is False
+        assert result.code == "NO_PRICE_REFERENCE"
+
+    def test_slippage_exceeded_rejected(self):
+        gate = RiskGate(max_position_usd=5000, max_slippage_pct=1.0)
+        order = OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="buy", order_type="limit", size="100", px="51000",
+        )
+        result = gate.check_order(order, "agent1", current_price=50000)
+        assert result.approved is False
+        assert result.code == "SLIPPAGE_EXCEEDED"
+
+    def test_slippage_within_tolerance_approved(self):
+        gate = RiskGate(max_position_usd=5000, max_slippage_pct=1.0)
+        order = OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="buy", order_type="limit", size="100", px="50200",
+        )
+        result = gate.check_order(order, "agent1", current_price=50000)
+        assert result.approved is True
+
+    def test_reduce_only_violation_rejected(self):
+        gate = RiskGate(max_position_usd=5000)
+        order = OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="sell", order_type="market", size="100", reduce_only=False,
+        )
+        result = gate.check_order(order, "agent1", current_position_side="long")
+        assert result.approved is False
+        assert result.code == "REDUCE_ONLY_VIOLATION"
+
+    def test_reduce_only_marked_order_approved(self):
+        gate = RiskGate(max_position_usd=5000)
+        order = OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="sell", order_type="market", size="100", reduce_only=True,
+        )
+        result = gate.check_order(order, "agent1", current_position_side="long")
+        assert result.approved is True
 
     def test_compute_risk_hash_is_deterministic(self):
         gate = RiskGate(max_position_usd=5000)

@@ -78,6 +78,7 @@ class AutonomousTradingAgent:
         dry_run: bool = True,
         max_position_usd: float = 5000,
         agent_id: str = "autonomous-trader-001",
+        enable_momentum: bool = False,
     ):
         self.cli = okx_cli
         self.risk_gate = risk_gate
@@ -85,6 +86,9 @@ class AutonomousTradingAgent:
         self.dry_run = dry_run
         self.max_position_usd = max_position_usd
         self.agent_id = agent_id
+        # Off by default — see _generate_signals docstring. Momentum is a
+        # phase-2+ strategy per the design doc's Section 0 MVP scope.
+        self.enable_momentum = enable_momentum
 
         self.executor = OrderExecutor(
             cli=okx_cli,
@@ -159,16 +163,36 @@ class AutonomousTradingAgent:
         return price_data
 
     def _generate_signals(self, asset: str, market_data: dict) -> list[Signal]:
-        """Generate signals from all strategies."""
+        """Generate signals from all enabled strategies.
+
+        Design-doc note (Section 0): momentum is a directional strategy the
+        design doc explicitly excluded from MVP scope — it's harder to defend
+        against a bad directional call than the market-neutral funding-arb
+        thesis. It's kept available here for phase 2 but disabled by default;
+        enable via self.enable_momentum only once that phase's graduation
+        criteria (Section 7) are actually met.
+
+        Also note: funding_rate_signal below is a directional contrarian bet
+        on funding-rate extremes reverting — it is NOT the delta-neutral
+        long-spot/short-perp funding arbitrage described in the design doc's
+        Section 0 thesis. That strategy requires a two-leg hedged position
+        this executor doesn't place. Until that's built, this signal carries
+        real directional risk and should be sized and reasoned about
+        accordingly, not treated as market-neutral.
+        """
         prices = self._extract_prices(market_data)
         price_data = self._extract_price_data(market_data)
         funding_rate = market_data.get("funding_rate", 0.0)
 
         signals = [
             mean_reversion_signal(asset, prices, window=20, z_threshold=2.0),
-            momentum_signal(asset, price_data, short_window=5, long_window=20),
             funding_rate_signal(asset, funding_rate, threshold=0.001),
         ]
+
+        if self.enable_momentum:
+            signals.append(
+                momentum_signal(asset, price_data, short_window=5, long_window=20)
+            )
 
         return signals
 
@@ -261,7 +285,16 @@ class AutonomousTradingAgent:
                 logger.info(f"No order for {asset} (no tradeable signal or already positioned)")
                 continue
 
-            risk_result = self.risk_gate.check_order(order, self.agent_id)
+            asset_prices = self._extract_prices(md)
+            current_price = asset_prices[-1] if asset_prices else None
+            current_position_side = (md.get("position") or {}).get("side")
+
+            risk_result = self.risk_gate.check_order(
+                order,
+                self.agent_id,
+                current_price=current_price,
+                current_position_side=current_position_side,
+            )
             if not risk_result.approved:
                 result.errors.append(
                     f"Risk gate rejected {asset}: {risk_result.reason}"

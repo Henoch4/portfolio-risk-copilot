@@ -26,6 +26,7 @@ contract TradeAuditTrail {
         bytes32 riskHash;
         bytes   signature;
         bool    executed;
+        bool    isShort;
     }
 
     struct RiskParams {
@@ -56,6 +57,7 @@ contract TradeAuditTrail {
         uint256 sizeUsd;
         bytes32 riskHash;
         bytes signature;
+        bool isShort;
     }
 
     TradeDecision[]   public decisions;
@@ -67,8 +69,10 @@ contract TradeAuditTrail {
     mapping(address => uint256)     public dailyLoss;
     mapping(address => uint256)     public dailyTrades;
     mapping(address => RiskParams)  public agentRiskParams;
-    mapping(address => uint256)     public dailyBlock;
+    mapping(address => uint256)     public dailyBucket;   // current UTC-day bucket for this agent's counters
     mapping(address => bytes32)     public lastDecisionId;
+    mapping(address => bool)        public killSwitchActive;
+    mapping(address => string)      public killSwitchReason;
 
     event DecisionLogged(
         bytes32 indexed decisionId,
@@ -90,6 +94,8 @@ contract TradeAuditTrail {
     );
 
     event RiskParamsUpdated(address indexed agent, RiskParams params);
+    event KillSwitchActivated(address indexed agent, string reason, uint256 timestamp);
+    event KillSwitchDeactivated(address indexed agent, uint256 timestamp);
 
     modifier onlyAgent() {
         require(msg.sender == tx.origin, "relayer calls not allowed");
@@ -128,6 +134,28 @@ contract TradeAuditTrail {
     }
 
     /**
+     * @notice Halt all future logDecision calls from this agent immediately.
+     *         Mirrors the off-chain RiskGate kill switch (src/execution.py) so
+     *         the halt is enforced even if the off-chain process is compromised
+     *         or bypassed — this is the non-overridable control, not a UI toggle.
+     */
+    function activateKillSwitch(string calldata reason) external onlyAgent {
+        killSwitchActive[msg.sender] = true;
+        killSwitchReason[msg.sender] = reason;
+        emit KillSwitchActivated(msg.sender, reason, block.timestamp);
+    }
+
+    /**
+     * @notice Resume trading. A deliberate, separate call — never automatic,
+     *         same principle as the off-chain deactivate_kill_switch().
+     */
+    function deactivateKillSwitch() external onlyAgent {
+        killSwitchActive[msg.sender] = false;
+        killSwitchReason[msg.sender] = "";
+        emit KillSwitchDeactivated(msg.sender, block.timestamp);
+    }
+
+    /**
      * @notice Log a trade decision BEFORE execution.
      *         Uses a struct to avoid stack-too-deep errors.
      */
@@ -136,6 +164,8 @@ contract TradeAuditTrail {
         onlyAgent
         returns (bool)
     {
+        require(!killSwitchActive[msg.sender], "KILL_SWITCH_ACTIVE");
+
         bytes32 decisionId = input.decisionId;
         require(!decisionLogged[decisionId], "decision already logged");
 
@@ -160,13 +190,21 @@ contract TradeAuditTrail {
         require(p.maxPositionSizeUsd > 0, "risk params not set");
         require(input.sizeUsd <= p.maxPositionSizeUsd, "EXCEEDS_MAX_POSITION_SIZE");
         require(uint256(input.confidence) >= p.minConfidenceBps, "BELOW_MIN_CONFIDENCE");
-        require(dailyTrades[msg.sender] < 100, "MAX_TRADES_EXCEEDED");
 
-        // Daily reset on new block (simplified: resets when block number advances)
-        // In production: use a 24h window with proper daily reset logic
-        if (block.number > dailyBlock[msg.sender]) {
-            dailyBlock[msg.sender] = block.number;
+        // Daily reset: the original version only recorded the current block
+        // number and never zeroed the counters, so "daily" limits were
+        // actually lifetime limits. Fixed here to compare UTC-day buckets and
+        // reset dailyTrades/dailyVolume/dailyLoss when the bucket changes.
+        uint256 today = block.timestamp / 1 days;
+        if (today > dailyBucket[msg.sender]) {
+            dailyBucket[msg.sender] = today;
+            dailyTrades[msg.sender] = 0;
+            dailyVolume[msg.sender] = 0;
+            dailyLoss[msg.sender] = 0;
         }
+
+        require(dailyTrades[msg.sender] < 100, "MAX_TRADES_EXCEEDED");
+        require(dailyLoss[msg.sender] < p.maxDailyLossUsd, "DAILY_LOSS_LIMIT_EXCEEDED");
 
         decisionLogged[decisionId] = true;
         lastDecisionId[msg.sender] = decisionId;
@@ -185,7 +223,8 @@ contract TradeAuditTrail {
             timestamp: block.timestamp,
             riskHash: input.riskHash,
             signature: input.signature,
-            executed: false
+            executed: false,
+            isShort: input.isShort
         }));
 
         emit DecisionLogged(
@@ -221,9 +260,23 @@ contract TradeAuditTrail {
         d.executed = true;
         decisionExecuted[decisionId] = true;
 
-        if (success && fillPrice < d.entryPrice) {
-            uint256 lossUsd = (d.entryPrice - fillPrice) * d.sizeUsd / 1e8;
-            dailyLoss[msg.sender] += lossUsd;
+        // Direction-aware P&L: the original version treated any fill below
+        // entry price as a loss, which is only true for a long. For a short
+        // (isShort = true), a price drop below entry is a gain, and a price
+        // rise above entry is the loss. Get this backwards and the audit
+        // trail's own risk enforcement can mislabel a winning short as a
+        // loss (spuriously tightening the daily loss limit) or, worse, fail
+        // to record a real loss on a short that moved against the agent.
+        if (success) {
+            uint256 lossUsd = 0;
+            if (!d.isShort && fillPrice < d.entryPrice) {
+                lossUsd = (d.entryPrice - fillPrice) * d.sizeUsd / 1e8;
+            } else if (d.isShort && fillPrice > d.entryPrice) {
+                lossUsd = (fillPrice - d.entryPrice) * d.sizeUsd / 1e8;
+            }
+            if (lossUsd > 0) {
+                dailyLoss[msg.sender] += lossUsd;
+            }
         }
 
         executions.push(ExecutionReceipt({
@@ -253,7 +306,7 @@ contract TradeAuditTrail {
         bytes32 s;
         uint8 v;
 
-        assembly {
+        assembly ("memory-safe") {
             r := mload(add(signature, 32))
             s := mload(add(signature, 64))
             v := byte(0, mload(add(signature, 96)))
