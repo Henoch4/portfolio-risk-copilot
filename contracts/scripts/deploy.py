@@ -16,15 +16,15 @@ import os
 import sys
 from pathlib import Path
 
-from web3 import Web
+from web3 import Web3 as Web
 from eth_account import Account
 
-CONTRACT_DIR = Path(__file__).resolve().parent.parent / "contracts"
+CONTRACT_DIR = Path(__file__).resolve().parent.parent  # contracts/
 ABI_PATH = CONTRACT_DIR / "artifacts" / "TradeAuditTrail_abi.json"
 BYTECODE_PATH = CONTRACT_DIR / "artifacts" / "TradeAuditTrail_bytecode.txt"
-RPC_URL = os.getenv("XLAYER_RPC_URL", "https://testnet-rpc.xlayer.tech")
+RPC_URL = os.getenv("XLAYER_RPC_URL", "https://xlayertestrpc.okx.com")
 PRIVATE_KEY = os.getenv("DEPLOYER_PRIVATE_KEY")
-CHAIN_ID = 195  # X Layer Testnet
+CHAIN_ID = 1952  # X Layer Testnet (per RPC)
 
 
 def deploy_contract():
@@ -83,23 +83,25 @@ def deploy_contract():
 
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
     print(f"\nContract deployed!")
-    print(f"Address: {receipt.contract_address}")
-    print(f"Block: {receipt.blockNumber}")
-    print(f"Gas used: {receipt.gasUsed}")
-    print(f"Status: {'SUCCESS' if receipt.status == 1 else 'FAILED'}")
+    print(f"Address: {receipt.get('contractAddress', receipt.get('contract_address', 'unknown'))}")
+    print(f"Block: {receipt.get('blockNumber', receipt.get('block_number', 'unknown'))}")
+    print(f"Gas used: {receipt.get('gasUsed', receipt.get('gas_used', 'unknown'))}")
+    print(f"Status: {'SUCCESS' if receipt.get('status', 0) == 1 else 'FAILED'}")
+
+    contract_address = receipt.get('contractAddress', receipt.get('contract_address'))
 
     # Verify contract is callable
-    deployed = w3.eth.contract(address=receipt.contract_address, abi=abi)
+    deployed = w3.eth.contract(address=contract_address, abi=abi)
     count = deployed.functions.getDecisionCount().call()
     print(f"\nVerification: getDecisionCount() = {count}")
 
     # Save deployment info
     deploy_info = {
-        "address": receipt.contract_address,
+        "address": contract_address,
         "chain_id": CHAIN_ID,
         "tx_hash": tx_hash.hex(),
-        "gas_used": receipt.gasUsed,
-        "block_number": receipt.blockNumber,
+        "gas_used": receipt.get('gasUsed', receipt.get('gas_used', 0)),
+        "block_number": receipt.get('blockNumber', receipt.get('block_number', 0)),
         "deployer": account.address,
     }
     info_path = CONTRACT_DIR / "deployment.json"
@@ -108,11 +110,11 @@ def deploy_contract():
     print(f"\nDeployment info saved to {info_path}")
 
     print(f"\nNext steps:")
-    print(f"  1. Set AUDIT_CONTRACT_ADDRESS={receipt.contract_address}")
+    print(f"  1. Set AUDIT_CONTRACT_ADDRESS={contract_address}")
     print(f"  2. Run setRiskParams() to configure the agent")
     print(f"  3. Start the trading agent: uvicorn src.main:app --port 8000")
 
-    return receipt.contract_address
+    return contract_address
 
 
 if __name__ == "__main__":

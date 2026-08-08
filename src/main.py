@@ -185,7 +185,7 @@ def _make_onchain_logger() -> OnchainLogger | None:
         rpc_url=rpc_url,
         contract_address=contract_addr,
         private_key=private_key,
-        chain_id=int(os.getenv("XLAYER_CHAIN_ID", "195")),
+        chain_id=int(os.getenv("XLAYER_CHAIN_ID", "1952")),
     )
 
 _dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
