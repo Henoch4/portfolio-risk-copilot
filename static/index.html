@@ -23,10 +23,7 @@
     }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      min-height: 100vh;
-      line-height: 1.5;
+      background: var(--bg); color: var(--text); min-height: 100vh; line-height: 1.5;
     }
     .container { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem; }
     header { text-align: center; margin-bottom: 2.5rem; }
@@ -35,7 +32,6 @@
     .badge {
       display: inline-block; padding: 0.2rem 0.6rem; border-radius: 999px;
       font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
-      margin-top: 0.5rem;
     }
     .badge-dry-run { background: rgba(234, 179, 8, 0.15); color: var(--yellow); border: 1px solid rgba(234, 179, 8, 0.3); }
     .badge-live { background: rgba(239, 68, 68, 0.15); color: var(--red); border: 1px solid rgba(239, 68, 68, 0.3); }
@@ -44,11 +40,12 @@
     .controls { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: end; }
     .field { flex: 1; min-width: 140px; }
     .field label { display: block; font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.35rem; font-weight: 500; }
-    select, input, textarea {
+    select, input, textarea, .chip-group {
       width: 100%; padding: 0.6rem 0.75rem; background: var(--surface-2);
       border: 1px solid var(--border); border-radius: 8px; color: var(--text);
       font-size: 0.85rem; font-family: inherit; outline: none; transition: border-color 0.15s;
     }
+    select, input, textarea { box-sizing: border-box; }
     select:focus, input:focus, textarea:focus { border-color: var(--accent); }
     textarea { font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 0.8rem; resize: vertical; min-height: 100px; }
     button.run-btn {
@@ -58,6 +55,11 @@
     }
     button.run-btn:hover { background: #5558e6; box-shadow: 0 0 20px var(--accent-glow); }
     button.run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.kill-btn { padding: 0.3rem 0.8rem; font-size: 0.75rem; border-radius: 6px; }
+    button.kill-active { background: #ef4444; }
+    button.kill-active:hover { background: #dc2626; }
+    button.kill-inactive { background: var(--green); color: var(--bg); border: none; }
+    button.kill-inactive:hover { background: #4ade80; }
     .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 0.4rem; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .signal-badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 6px; font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
@@ -72,6 +74,8 @@
     .table th { text-align: left; padding: 0.6rem 0.75rem; background: var(--surface-2); border-bottom: 1px solid var(--border); font-weight: 600; color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; }
     .table td { padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border); }
     .table tr:hover { background: var(--surface-2); }
+    .table tr.row-rejected { border-left: 3px solid var(--red); }
+    .table tr.row-rejected td { color: var(--text-dim); }
     .meta { display: flex; gap: 1.5rem; justify-content: center; margin-bottom: 1.5rem; flex-wrap: wrap; }
     .meta-item { text-align: center; }
     .meta-item .value { font-size: 1rem; font-weight: 600; }
@@ -89,6 +93,18 @@
     footer a { color: var(--accent); text-decoration: none; }
     footer a:hover { text-decoration: underline; }
     .log-hash { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.7rem; color: var(--text-dim); }
+    .chip-group { display: flex; flex-wrap: wrap; gap: 0.3rem; padding: 0.25rem; }
+    .chip {
+      display: inline-block; padding: 0.3rem 0.75rem; border-radius: 6px;
+      font-size: 0.75rem; font-weight: 500; cursor: pointer;
+      transition: all 0.15s border; border: 1px solid var(--border);
+      background: var(--surface-2); color: var(--text-dim);
+    }
+    .chip:hover { background: var(--surface); color: var(--text); }
+    .chip.selected { background: var(--accent); color: white; border-color: var(--accent); }
+    .kill-input-row { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
+    .kill-input-row input { flex: 1; }
+    .kill-input-row button { white-space: nowrap; }
   </style>
 </head>
 <body>
@@ -96,7 +112,10 @@
     <header>
       <h1>AuditTrail Trader</h1>
       <p>Autonomous AI trading with on-chain audit trail</p>
-      <span class="badge badge-dry-run" id="modeBadge">DRY-RUN MODE</span>
+      <div id="headerControls" style="margin-top: 0.75rem; display: flex; align-items: center; gap: 0.75rem; justify-content: center;">
+        <span class="badge badge-dry-run" id="modeBadge">DRY-RUN MODE</span>
+        <button class="kill-btn" id="headerKillBtn" onclick="toggleKillSwitch()" style="display:none;">Deactivate Kill Switch</button>
+      </div>
     </header>
 
     <div class="card">
@@ -104,12 +123,12 @@
       <div class="controls">
         <div class="field">
           <label>Assets</label>
-          <select id="assets" multiple style="height: 120px;">
-            <option value="BTC-USDT-SWAP" selected>BTC-USDT-SWAP</option>
-            <option value="ETH-USDT-SWAP" selected>ETH-USDT-SWAP</option>
-            <option value="SOL-USDT-SWAP">SOL-USDT-SWAP</option>
-            <option value="BNB-USDT-SWAP">BNB-USDT-SWAP</option>
-          </select>
+          <div class="chip-group" id="assetChips">
+            <div class="chip selected" data-asset="BTC-USDT-SWAP">BTC-USDT-SWAP</div>
+            <div class="chip selected" data-asset="ETH-USDT-SWAP">ETH-USDT-SWAP</div>
+            <div class="chip" data-asset="SOL-USDT-SWAP">SOL-USDT-SWAP</div>
+            <div class="chip" data-asset="BNB-USDT-SWAP">BNB-USDT-SWAP</div>
+          </div>
         </div>
         <div class="field">
           <label>Mode</label>
@@ -167,6 +186,7 @@
   <script>
     let currentTab = 'cycle';
     let dryRun = true;
+    let killSwitchReason = '';
 
     function switchTab(tab) {
       currentTab = tab;
@@ -178,8 +198,18 @@
     }
 
     function getSelectedAssets() {
-      const select = document.getElementById('assets');
-      return Array.from(select.selectedOptions).map(o => o.value);
+      const chips = document.querySelectorAll('#assetChips .chip.selected');
+      return Array.from(chips).map(c => c.getAttribute('data-asset'));
+    }
+
+    function initAssetChips() {
+      const chips = document.querySelectorAll('#assetChips .chip');
+      chips.forEach(chip => {
+        chip.addEventListener('click', function(e) {
+          e.stopPropagation();
+          chip.classList.toggle('selected');
+        });
+      });
     }
 
     function renderSignal(sig) {
@@ -197,7 +227,19 @@
       const container = document.getElementById('cycleResults');
       container.classList.remove('hidden', 'empty-state');
 
-      let html = '<div style="margin-bottom: 1rem;"><strong>Cycle ID:</strong> ' + result.cycle_id + '</div>';
+      let html = '';
+
+      // Error summary at the top if any errors
+      if (result.errors && result.errors.length > 0) {
+        html += '<div class="card-title">Errors</div>';
+        html += '<div style="margin-bottom: 1rem;">';
+        result.errors.forEach(function(err) {
+          html += '<div style="color: var(--red); font-size: 0.8rem; margin-bottom: 0.25rem;">' + err + '</div>';
+        });
+        html += '</div>';
+      }
+
+      html += '<div style="margin-bottom: 1rem;"><strong>Cycle ID:</strong> ' + result.cycle_id + '</div>';
       html += '<div style="margin-bottom: 1rem;"><strong>Timestamp:</strong> ' + new Date(result.timestamp * 1000).toLocaleString() + '</div>';
       html += '<div style="margin-bottom: 1.5rem;"><strong>Status:</strong> <span class="status-badge status-dry-run">' + (result.dry_run ? 'DRY-RUN' : 'LIVE') + '</span></div>';
 
@@ -213,9 +255,10 @@
         html += '<table class="table"><thead><tr><th>Asset</th><th>Side</th><th>Size (USD)</th><th>Confidence</th><th>Status</th><th>Risk Hash</th></tr></thead><tbody>';
         result.decisions.forEach(dec => {
           let statusCls = 'status-dry-run';
-          if (dec.status === 'approved') statusCls = 'status-approved';
-          else if (dec.status === 'rejected') statusCls = 'status-rejected';
-          html += '<tr><td>' + dec.asset + '</td><td>' + (dec.side || '-') + '</td><td>' + (dec.size_usd ? dec.size_usd.toFixed(0) : '-') + '</td><td>' + Math.round((dec.confidence || 0) * 100) + '%</td><td><span class="status-badge ' + statusCls + '">' + dec.status + '</span></td><td class="log-hash">' + (dec.risk_hash ? dec.risk_hash.substring(0, 10) + '...' : '-') + '</td></tr>';
+          let rowCls = '';
+          if (dec.status === 'approved') { statusCls = 'status-approved'; }
+          else if (dec.status === 'rejected') { statusCls = 'status-rejected'; rowCls = 'row-rejected'; }
+          html += '<tr class="' + rowCls + '"><td>' + dec.asset + '</td><td>' + (dec.side || '-') + '</td><td>' + (dec.size_usd ? dec.size_usd.toFixed(0) : '-') + '</td><td>' + Math.round((dec.confidence || 0) * 100) + '%</td><td><span class="status-badge ' + statusCls + '">' + dec.status + '</span></td><td class="log-hash">' + (dec.risk_hash ? dec.risk_hash.substring(0, 10) + '...' : '-') + '</td></tr>';
         });
         html += '</tbody></table>';
       } else {
@@ -227,9 +270,10 @@
         html += '<table class="table"><thead><tr><th>Asset</th><th>Side</th><th>Size (USD)</th><th>Price</th><th>Tx Hash</th><th>Status</th></tr></thead><tbody>';
         result.executions.forEach(ex => {
           let statusCls = 'status-dry-run';
-          if (ex.status === 'success') statusCls = 'status-approved';
-          else if (ex.status === 'failed') statusCls = 'status-rejected';
-          html += '<tr><td>' + ex.asset + '</td><td>' + (ex.side || '-') + '</td><td>' + (ex.size_usd ? ex.size_usd.toFixed(0) : '-') + '</td><td>' + (ex.fill_price || '-') + '</td><td class="log-hash">' + (ex.tx_hash ? ex.tx_hash.substring(0, 10) + '...' : 'N/A') + '</td><td><span class="status-badge ' + statusCls + '">' + ex.status + '</span></td></tr>';
+          let rowCls = '';
+          if (ex.status === 'success') { statusCls = 'status-approved'; }
+          else if (ex.status === 'failed') { statusCls = 'status-rejected'; rowCls = 'row-rejected'; }
+          html += '<tr class="' + rowCls + '"><td>' + ex.asset + '</td><td>' + (ex.side || '-') + '</td><td>' + (ex.size_usd ? ex.size_usd.toFixed(0) : '-') + '</td><td>' + (ex.fill_price || '-') + '</td><td class="log-hash">' + (ex.tx_hash ? ex.tx_hash.substring(0, 10) + '...' : 'N/A') + '</td><td><span class="status-badge ' + statusCls + '">' + ex.status + '</span></td></tr>';
         });
         html += '</tbody></table>';
       } else {
@@ -282,7 +326,7 @@
       container.innerHTML = html;
     }
 
-       function renderRiskStats(stats) {
+    function renderRiskStats(stats) {
       const container = document.getElementById('riskResults');
       container.classList.remove('hidden', 'empty-state');
 
@@ -306,45 +350,52 @@
       html += '<tr><td>Min Confidence</td><td>' + (stats.min_confidence_bps / 100).toFixed(1) + '%</td></tr>';
       html += '</tbody></table>';
 
-      // Kill switch
-      const killStatus = stats.kill_switch || { active: false, reason: null, activated_at: null };
-      const isKillActive = killStatus.active;
-      html += '<div class="card-title" style="margin-top: 1.5rem;">Kill Switch</div>';
-      html += '<div style="margin-bottom: 1rem;">';
-      html += '<span class="status-badge ' + (isKillActive ? 'status-rejected' : 'status-approved') + '">' + (isKillActive ? 'ACTIVE' : 'INACTIVE') + '</span>';
-      if (killStatus.reason) {
-        html += '<div style="color: var(--red); font-size: 0.8rem; margin-top: 0.3rem;">Reason: ' + killStatus.reason + '</div>';
-      }
-      html += '</div>';
-      html += '<div style="display: flex; gap: 0.5rem;">';
-      html += '<button class="run-btn" style="' + (isKillActive ? 'background: #5558e6' : 'background: var(--red);') + '" onclick="toggleKillSwitch()" id="killSwitchBtn">' + (isKillActive ? 'Deactivate Kill Switch' : 'Activate Kill Switch') + '</button>';
-      html += '<input type="text" id="killReason" placeholder="Reason (required for activation)" style="flex: 1; font-size: 0.8rem;">';
-      html += '</div>';
-
       container.innerHTML = html;
     }
 
-    async function toggleKillSwitch() {
-      const btn = document.getElementById('killSwitchBtn');
-      const reason = document.getElementById('killReason').value.trim();
+    function showError(msg) {
+      const box = document.getElementById('errorBox');
+      box.textContent = msg;
+      box.classList.remove('hidden');
+    }
 
+    function hideError() {
+      document.getElementById('errorBox').classList.add('hidden');
+    }
+
+    function updateKillSwitchHeader(isActive, reason) {
+      const btn = document.getElementById('headerKillBtn');
+      if (isActive) {
+        btn.style.display = 'inline-block';
+        btn.textContent = 'Deactivate Kill Switch';
+        btn.className = 'kill-btn kill-inactive';
+        killSwitchReason = reason || '';
+      } else {
+        btn.style.display = 'none';
+      }
+    }
+
+    async function toggleKillSwitch() {
+      const btn = document.getElementById('headerKillBtn');
+      const isActive = btn.textContent.includes('Deactivate');
+      
       try {
-        let res;
-        if (btn.textContent.includes('Activate')) {
-          if (!reason) {
-            showError('Kill switch reason is required.');
-            return;
-          }
+        let res, data;
+        if (isActive) {
+          // Deactivate - no reason needed
+          res = await fetch('/kill-switch/deactivate', { method: 'POST' });
+          data = await res.json();
+        } else {
+          // Activate - need reason
+          const reason = await promptForReason();
+          if (!reason) return;
           res = await fetch('/kill-switch/activate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ reason: reason }),
           });
-        } else {
-          res = await fetch('/kill-switch/deactivate', { method: 'POST' });
+          data = await res.json();
         }
-
-        const data = await res.json();
 
         if (!res.ok) {
           throw new Error(data.detail || data.error || ('Request failed (' + res.status + ')'));
@@ -356,14 +407,11 @@
       }
     }
 
-    function showError(msg) {
-      const box = document.getElementById('errorBox');
-      box.textContent = msg;
-      box.classList.remove('hidden');
-    }
-
-    function hideError() {
-      document.getElementById('errorBox').classList.add('hidden');
+    function promptForReason() {
+      return new Promise(resolve => {
+        const reason = window.prompt('Enter kill switch reason (required):');
+        resolve(reason ? reason.trim() : '');
+      });
     }
 
     async function runTradingCycle() {
@@ -400,14 +448,7 @@
           if (riskRes.ok) {
             const riskData = await riskRes.json();
             renderRiskStats(riskData);
-          }
-
-          if (dryRun) {
-            const auditRes = await fetch('/audit-stats?days=7');
-            if (auditRes.ok) {
-              const auditData = await auditRes.json();
-              renderAuditStats(auditData);
-            }
+            updateKillSwitchHeader(riskData.kill_switch?.active || false, riskData.kill_switch?.reason);
           }
         }
       } catch (err) {
@@ -424,6 +465,10 @@
         if (riskRes.ok) {
           const riskData = await riskRes.json();
           renderRiskStats(riskData);
+          if (currentTab === 'stats') {
+            const ks = riskData.kill_switch || { active: false, reason: null };
+            updateKillSwitchHeader(ks.active, ks.reason);
+          }
         }
 
         const auditRes = await fetch('/audit-stats?days=7');
@@ -436,6 +481,7 @@
       }
     }
 
+    initAssetChips();
     loadStats();
   </script>
 </body>
