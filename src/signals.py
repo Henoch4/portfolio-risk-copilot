@@ -18,10 +18,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal
 
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Literal
-
 
 SignalDirection = Literal["LONG", "SHORT", "NEUTRAL"]
 

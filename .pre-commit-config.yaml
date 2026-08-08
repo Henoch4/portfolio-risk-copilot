@@ -1,0 +1,12 @@
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+        name: gitleaks (scan staged changes for secrets)
+        description: >
+          Catches key-shaped strings (private keys, API tokens, etc.) in any
+          file before a commit is made, regardless of filename. This is the
+          layer that was missing when a private key got hardcoded directly
+          into scripts/test_onchain.py — .gitignore only protects specific
+          filenames like .env, not the content of an ordinary .py file.

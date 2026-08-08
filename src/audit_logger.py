@@ -21,6 +21,7 @@ from pathlib import Path
 
 from web3 import Web3 as Web
 from eth_account import Account
+from eth_account.messages import encode_defunct
 
 logger = logging.getLogger(__name__)
 
@@ -189,10 +190,23 @@ class OnchainLogger:
         self,
         max_position_usd: float,
         max_daily_loss_usd: float,
-        max_leverage_bps: int = 500,
+        max_leverage_bps: int = 50000,
         min_confidence_bps: int = 7000,
     ) -> str:
-        """Set non-overridable risk parameters on the contract."""
+        """Set non-overridable risk parameters on the contract.
+
+        Units, precisely (this is where the live contract previously broke):
+        - max_position_usd / max_daily_loss_usd: plain USD, scaled to 1e8
+          fixed-point below to match how sizeUsd/entryPrice are scaled when
+          logging decisions (audit_logger.py, ~line 275).
+        - max_leverage_bps: basis points where 10000 = 1x (100%). The
+          previous default here was 500, i.e. 0.05x — with position size
+          correctly scaled to $5000 * 1e8, that capped every real order at
+          maxAllowed = (5000e8 * 500) / 10000 = $250, so the on-chain gate
+          silently rejected every realistic trade. 5x leverage is 50000 bps,
+          not 500. Verify with TradeAuditTrail.sol's own leverage check
+          (search for EXCEEDS_MAX_LEVERAGE) before changing this default.
+        """
         tx_data = self.contract.functions.setRiskParams(
             int(max_position_usd * 1e8),
             int(max_daily_loss_usd * 1e8),
@@ -243,13 +257,17 @@ class OnchainLogger:
         The contract uses ecrecover with the Ethereum signed message prefix:
         keccak256("\x19Ethereum Signed Message:\n32" + payload_hash)
 
-        So we must use personal_sign, not EIP-712.
+        So we must use personal_sign, not EIP-712. Previously this called
+        self.account.sign_message(payload_hash, mechanism="personal") —
+        that isn't a valid signature on eth_account's LocalAccount.sign_message
+        (no such "mechanism" kwarg exists), so this raised TypeError on
+        every call. It never reached the network; the on-chain audit trail
+        couldn't run at all. Fixed by building the EIP-191 SignableMessage
+        with encode_defunct, which is the actual API for this.
         """
         payload_hash = self._compute_payload_hash(payload)
-        signed_msg = self.account.sign_message(
-            payload_hash,
-            mechanism="personal",
-        )
+        signable_message = encode_defunct(primitive=payload_hash)
+        signed_msg = self.account.sign_message(signable_message)
         return signed_msg.signature
 
     def log_decision(self, payload: DecisionPayload) -> str:

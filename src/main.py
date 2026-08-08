@@ -15,7 +15,7 @@ from collections import defaultdict
 from dataclasses import asdict
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -70,6 +70,32 @@ def _check_rate_limit(client_ip: str = "global") -> bool:
         return False
     _rate_limit_store[client_ip].append(now)
     return True
+
+
+# --- Auth for mutating, money-path endpoints ---
+# /trade and /kill-switch/* were previously unauthenticated: anyone who
+# found the URL could trigger live trades or toggle the kill switch. This
+# is a shared-secret header check, not full auth, but it closes the
+# "anyone on the internet can call these" gap.
+_AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", "").strip()
+
+
+def _require_agent_token(x_agent_token: str | None = Header(default=None)) -> None:
+    if not _AGENT_API_TOKEN:
+        if not _dry_run:
+            # Fail closed: refuse to run unauthenticated mutating endpoints
+            # in live mode rather than silently allowing open access to a
+            # real-money trading path.
+            raise HTTPException(
+                500,
+                "AGENT_API_TOKEN is not configured. Live mode requires it "
+                "before /trade or /kill-switch/* will accept requests.",
+            )
+        # Dry-run with no token configured: allow, for local/demo use, but
+        # this branch never applies once DRY_RUN=false.
+        return
+    if x_agent_token != _AGENT_API_TOKEN:
+        raise HTTPException(401, "Missing or invalid X-Agent-Token header.")
 
 
 # --- x402 payment SDK wiring ---
@@ -232,7 +258,7 @@ class AuditStatsRequest(BaseModel):
 
 
 @app.post("/trade")
-async def trade(req: TradeRequest):
+async def trade(req: TradeRequest, _auth: None = Depends(_require_agent_token)):
     """
     Run a trading cycle: generate signals → pass risk checks → log onchain → execute.
     
@@ -250,6 +276,22 @@ async def trade(req: TradeRequest):
             423,
             f"Kill switch is active: {kill_status['reason']}. "
             f"Call POST /kill-switch/deactivate to resume.",
+        )
+
+    if req.mode == "cycle":
+        # This was previously accepted and silently ignored — a single
+        # cycle ran regardless of what the caller asked for. Continuous
+        # mode isn't wired to anything, and given this deploys to Vercel
+        # (serverless, no long-running background loop), the honest fix is
+        # to run repeated cycles externally — e.g. a Vercel Cron Job or any
+        # scheduler calling POST /trade with mode="single" on an interval —
+        # rather than pretend a serverless function can run a loop.
+        raise HTTPException(
+            501,
+            "mode='cycle' is not implemented. This deploys to a serverless "
+            "environment that can't run a persistent background loop — call "
+            "POST /trade with mode='single' on a schedule (e.g. a Vercel "
+            "Cron Job) instead.",
         )
 
     try:
@@ -324,7 +366,7 @@ async def kill_switch_status():
 
 
 @app.post("/kill-switch/activate")
-async def activate_kill_switch(req: KillSwitchRequest):
+async def activate_kill_switch(req: KillSwitchRequest, _auth: None = Depends(_require_agent_token)):
     """Halt all trading immediately. Always activates the off-chain gate;
     also activates onchain if the audit logger is configured, so the halt
     holds even if a caller only checks one layer."""
@@ -340,7 +382,7 @@ async def activate_kill_switch(req: KillSwitchRequest):
 
 
 @app.post("/kill-switch/deactivate")
-async def deactivate_kill_switch():
+async def deactivate_kill_switch(_auth: None = Depends(_require_agent_token)):
     """Resume trading. A deliberate, separate call — this is never triggered
     automatically, only the activation is (see RiskGate.report_loss)."""
     _risk_gate.deactivate_kill_switch()
