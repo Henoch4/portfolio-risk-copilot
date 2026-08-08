@@ -19,11 +19,26 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from x402.http import OKXAuthConfig, OKXFacilitatorClient, OKXFacilitatorConfig
-from x402.http.middleware.fastapi import PaymentMiddlewareASGI
-from x402.mechanisms.evm.exact.server import ExactEvmScheme
-from x402.mechanisms.evm.deferred.server import AggrDeferredEvmScheme
-from x402.server import x402ResourceServer
+
+# x402 payment middleware — only available when OKX credentials are configured.
+# Guard against import failures so the app boots in dry-run mode without x402 deps.
+try:
+    from x402.http import OKXAuthConfig as _OKXAuthConfig
+    from x402.http import OKXFacilitatorClient, OKXFacilitatorConfig
+    from x402.http.middleware.fastapi import PaymentMiddlewareASGI
+    from x402.mechanisms.evm.exact.server import ExactEvmScheme
+    from x402.mechanisms.evm.deferred.server import AggrDeferredEvmScheme
+    from x402.server import x402ResourceServer
+    _x402_available = True
+except ImportError:
+    _x402_available = False
+    OKXAuthConfig = None
+    OKXFacilitatorClient = None
+    OKXFacilitatorConfig = None
+    PaymentMiddlewareASGI = None
+    ExactEvmScheme = None
+    AggrDeferredEvmScheme = None
+    x402ResourceServer = None
 
 from .auditor import run_audit, run_audit_from_data, AuditReport
 from .okx_cli import OkxCli, OkxCliConfig, OkxCliError
@@ -59,7 +74,7 @@ def _check_rate_limit(client_ip: str = "global") -> bool:
 
 # --- x402 payment SDK wiring ---
 _pay_to = os.getenv("PAY_TO_ADDRESS", "")
-if _pay_to:
+if _pay_to and _x402_available:
     _facilitator = OKXFacilitatorClient(
         OKXFacilitatorConfig(
             auth=OKXAuthConfig(
