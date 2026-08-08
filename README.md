@@ -45,9 +45,9 @@ Portfolio-risk-copilot/
 │   ├── auditor.py       # Existing risk audit (extended)
 │   └── okx_cli.py       # OKX CLI wrapper
 ├── tests/
-│   ├── test_signals.py     # 15 signal tests
-│   ├── test_execution.py   # 20 risk gate tests (incl. kill switch)
-│   └── test_auditor.py     # 24 audit tests
+│ ├── test_signals.py     # 15 signal tests
+│ ├── test_execution.py   # 20 risk gate tests (incl. kill switch)
+│ └── test_auditor.py     # 24 audit tests
 ├── scripts/
 │   ├── smoke_test.py            # Legacy audit smoke test
 │   └── smoke_test_trading.py    # Trading pipeline smoke test
