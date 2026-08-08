@@ -120,6 +120,7 @@
     .halt-notice.show { display: block; }
 
     .help-text { margin-top: 0.7rem; font-size: 0.75rem; color: var(--graphite); line-height: 1.6; }
+    .schedule-note { margin-top: 0.5rem; font-size: 0.7rem; color: var(--graphite); line-height: 1.5; }
 
     /* Tabs */
     .mode-tabs { display: flex; gap: 0; margin-bottom: 1.25rem; border-bottom: 1px solid var(--rule); }
@@ -193,11 +194,11 @@
           <label>Mode</label>
           <select id="tradeMode">
             <option value="single">Single Cycle</option>
-            <option value="cycle">Continuous Cycle</option>
           </select>
         </div>
         <button class="run-btn" id="runBtn" onclick="runCycle()">Run Trading Cycle</button>
       </div>
+      <div class="schedule-note">Serverless: each run is one cycle. Schedule POST /trade repeats (e.g. a Vercel Cron Job) for continuous trading.</div>
       <div class="halt-notice" id="haltNotice">Trading is halted. Resume from the status strip above to run a cycle.</div>
       <div class="help-text">Dry-run: no real trades are placed and nothing is sent on-chain.</div>
     </div>
