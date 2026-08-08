@@ -55,11 +55,12 @@ def deploy_contract():
     account = Account.from_key(PRIVATE_KEY)
     print(f"Deploying from: {account.address}")
     balance = w3.eth.get_balance(account.address)
-    print(f"Balance: {w3.from_wei(balance, 'ether')} ETH")
+    balance_native = w3.from_wei(balance, "ether")
+    print(f"Balance: {balance_native} OKB (native gas token on X Layer)")
 
     if balance < w3.to_wei("0.01", "ether"):
-        print("WARNING: Low balance. You need testnet ETH from faucet.")
-        print("Get it at: https://faucet.xlayer.tech")
+        print("WARNING: Low balance. You need testnet OKB from the faucet.")
+        print("Get OKB (gas token for X Layer) at: https://faucet.xlayer.tech")
         print("Continuing anyway...")
 
     print("\nDeploying TradeAuditTrail contract...")
