@@ -6,130 +6,189 @@
   <title>AuditTrail Trader</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
     :root {
-      --bg: #0a0a0f;
-      --surface: #12121a;
-      --surface-2: #1a1a26;
-      --border: #2a2a3a;
-      --text: #e4e4ed;
-      --text-dim: #8888a0;
-      --accent: #6366f1;
-      --accent-glow: rgba(99, 102, 241, 0.25);
-      --green: #22c55e;
-      --yellow: #eab308;
-      --red: #ef4444;
-      --orange: #f97316;
-      --radius: 12px;
+      --ink: #0E0F10;
+      --panel: #17181A;
+      --panel-2: #1D1F22;
+      --rule: #2C2E31;
+      --paper: #EDEAE2;
+      --graphite: #8B8D90;
+      --seal: #C1121F;
+      --seal-dim: rgba(193, 18, 31, 0.14);
+      --green: #4CA771;
+      --green-dim: rgba(76, 167, 113, 0.14);
+      --amber: #C99A3E;
+      --amber-dim: rgba(201, 154, 62, 0.14);
+      --radius: 10px;
     }
+
     body {
+      background: var(--ink);
+      color: var(--paper);
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      background: var(--bg); color: var(--text); min-height: 100vh; line-height: 1.5;
+      line-height: 1.5;
+      min-height: 100vh;
+      padding-bottom: 4rem;
     }
+
+    .num {
+      font-family: 'SF Mono', 'IBM Plex Mono', 'Cascadia Code', 'Fira Code', monospace;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.01em;
+    }
+
+    /* Sticky status strip */
+    .strip {
+      position: sticky; top: 0; z-index: 20;
+      background: var(--panel);
+      border-bottom: 1px solid var(--rule);
+      padding: 0.65rem 1.5rem;
+      display: flex; align-items: center; gap: 1.25rem;
+      backdrop-filter: blur(6px);
+    }
+    .strip-mode {
+      display: flex; align-items: center; gap: 0.5rem;
+      font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em;
+      color: var(--graphite); white-space: nowrap;
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); flex-shrink: 0; }
+    .dot.live { background: var(--seal); box-shadow: 0 0 0 3px var(--seal-dim); }
+    .dot.halted { background: var(--graphite); }
+
+    .strip-gauge { display: flex; align-items: center; gap: 0.6rem; flex: 1; min-width: 0; }
+    .gauge-label { font-size: 0.72rem; color: var(--graphite); text-transform: uppercase; letter-spacing: 0.06em; white-space: nowrap; }
+    .gauge-track { flex: 1; max-width: 280px; height: 6px; background: var(--rule); border-radius: 3px; overflow: hidden; }
+    .gauge-fill { height: 100%; background: var(--paper); border-radius: 3px; transition: width 0.4s ease, background 0.3s ease; }
+    .gauge-fill.warn { background: var(--amber); }
+    .gauge-fill.danger { background: var(--seal); }
+    .gauge-value { font-size: 0.78rem; color: var(--paper); white-space: nowrap; }
+    .gauge-value .dim { color: var(--graphite); }
+
+    .halt-btn {
+      padding: 0.45rem 1rem; border-radius: 7px; border: 1px solid var(--seal);
+      background: transparent; color: var(--seal); font-weight: 700; font-size: 0.72rem;
+      text-transform: uppercase; letter-spacing: 0.08em; cursor: pointer; white-space: nowrap;
+      transition: all 0.15s;
+    }
+    .halt-btn:hover { background: var(--seal-dim); }
+    .halt-btn.active { background: var(--seal); color: var(--ink); }
+    .halt-btn.active:hover { background: #a30f1a; }
+
+    /* Layout */
     .container { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem; }
-    header { text-align: center; margin-bottom: 2.5rem; }
-    header h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 0.25rem; }
-    header p { color: var(--text-dim); font-size: 0.9rem; }
-    .badge {
-      display: inline-block; padding: 0.2rem 0.6rem; border-radius: 999px;
-      font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
-    }
-    .badge-dry-run { background: rgba(234, 179, 8, 0.15); color: var(--yellow); border: 1px solid rgba(234, 179, 8, 0.3); }
-    .badge-live { background: rgba(239, 68, 68, 0.15); color: var(--red); border: 1px solid rgba(239, 68, 68, 0.3); }
-    .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; margin-bottom: 1.25rem; }
-    .card-title { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); margin-bottom: 1rem; }
-    .controls { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: end; }
-    .field { flex: 1; min-width: 140px; }
-    .field label { display: block; font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.35rem; font-weight: 500; }
-    select, input, textarea, .chip-group {
-      width: 100%; padding: 0.6rem 0.75rem; background: var(--surface-2);
-      border: 1px solid var(--border); border-radius: 8px; color: var(--text);
-      font-size: 0.85rem; font-family: inherit; outline: none; transition: border-color 0.15s;
-    }
-    select, input, textarea { box-sizing: border-box; }
-    select:focus, input:focus, textarea:focus { border-color: var(--accent); }
-    textarea { font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 0.8rem; resize: vertical; min-height: 100px; }
-    button.run-btn {
-      padding: 0.6rem 1.5rem; background: var(--accent); color: white; border: none;
-      border-radius: 8px; font-size: 0.85rem; font-weight: 600; cursor: pointer;
-      transition: all 0.15s; white-space: nowrap; min-height: 38px;
-    }
-    button.run-btn:hover { background: #5558e6; box-shadow: 0 0 20px var(--accent-glow); }
-    button.run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    button.kill-btn { padding: 0.3rem 0.8rem; font-size: 0.75rem; border-radius: 6px; }
-    button.kill-active { background: #ef4444; }
-    button.kill-active:hover { background: #dc2626; }
-    button.kill-inactive { background: var(--green); color: var(--bg); border: none; }
-    button.kill-inactive:hover { background: #4ade80; }
-    .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 0.4rem; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .signal-badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 6px; font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
-    .signal-long { background: rgba(34, 197, 94, 0.15); color: var(--green); }
-    .signal-short { background: rgba(239, 68, 68, 0.15); color: var(--red); }
-    .signal-neutral { background: rgba(156, 163, 175, 0.15); color: var(--text-dim); }
-    .status-badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; }
-    .status-approved { background: rgba(34, 197, 94, 0.15); color: var(--green); }
-    .status-rejected { background: rgba(239, 68, 68, 0.15); color: var(--red); }
-    .status-dry-run { background: rgba(234, 179, 8, 0.15); color: var(--yellow); }
-    .table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
-    .table th { text-align: left; padding: 0.6rem 0.75rem; background: var(--surface-2); border-bottom: 1px solid var(--border); font-weight: 600; color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; }
-    .table td { padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border); }
-    .table tr:hover { background: var(--surface-2); }
-    .table tr.row-rejected { border-left: 3px solid var(--red); }
-    .table tr.row-rejected td { color: var(--text-dim); }
-    .meta { display: flex; gap: 1.5rem; justify-content: center; margin-bottom: 1.5rem; flex-wrap: wrap; }
-    .meta-item { text-align: center; }
-    .meta-item .value { font-size: 1rem; font-weight: 600; }
-    .meta-item .key { font-size: 0.7rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
-    .error-box { background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 8px; padding: 1rem; color: var(--red); font-size: 0.85rem; margin-top: 1rem; }
-    .hidden { display: none; }
-    .help-text { margin-top: 0.5rem; font-size: 0.75rem; color: var(--text-dim); line-height: 1.6; }
-    .help-text code { background: var(--surface-2); padding: 0.1rem 0.3rem; border-radius: 4px; font-size: 0.7rem; }
-    .empty-state { text-align: center; padding: 3rem; color: var(--text-dim); font-size: 0.85rem; }
-    .mode-tabs { display: flex; gap: 0; margin-bottom: 1rem; border-bottom: 1px solid var(--border); }
-    .mode-tab { padding: 0.5rem 1rem; font-size: 0.8rem; font-weight: 500; color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; background: none; border: none; }
-    .mode-tab:hover { color: var(--text); }
-    .mode-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
-    footer { text-align: center; padding: 2rem 0; color: var(--text-dim); font-size: 0.75rem; }
-    footer a { color: var(--accent); text-decoration: none; }
-    footer a:hover { text-decoration: underline; }
-    .log-hash { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.7rem; color: var(--text-dim); }
-    .chip-group { display: flex; flex-wrap: wrap; gap: 0.3rem; padding: 0.25rem; }
+    header { margin-bottom: 2rem; }
+    header h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 0.2rem; }
+    header p { color: var(--graphite); font-size: 0.85rem; }
+
+    .card { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--radius); padding: 1.5rem; margin-bottom: 1.25rem; }
+    .card-title { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--graphite); margin-bottom: 1rem; }
+
+    /* Asset chips */
+    .chip-row { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1.1rem; }
     .chip {
-      display: inline-block; padding: 0.3rem 0.75rem; border-radius: 6px;
-      font-size: 0.75rem; font-weight: 500; cursor: pointer;
-      transition: all 0.15s border; border: 1px solid var(--border);
-      background: var(--surface-2); color: var(--text-dim);
+      padding: 0.45rem 0.9rem; border-radius: 999px; border: 1px solid var(--rule);
+      background: var(--panel-2); color: var(--graphite); font-size: 0.8rem; font-weight: 600;
+      cursor: pointer; user-select: none; transition: all 0.15s;
     }
-    .chip:hover { background: var(--surface); color: var(--text); }
-    .chip.selected { background: var(--accent); color: white; border-color: var(--accent); }
-    .kill-input-row { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
-    .kill-input-row input { flex: 1; }
-    .kill-input-row button { white-space: nowrap; }
+    .chip:hover { border-color: var(--paper); }
+    .chip.selected { background: var(--paper); color: var(--ink); border-color: var(--paper); }
+
+    .controls-row { display: flex; gap: 0.75rem; align-items: end; flex-wrap: wrap; }
+    .field { flex: 1; min-width: 160px; }
+    .field label { display: block; font-size: 0.72rem; color: var(--graphite); margin-bottom: 0.35rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
+    select {
+      width: 100%; padding: 0.55rem 0.7rem; background: var(--panel-2);
+      border: 1px solid var(--rule); border-radius: 8px; color: var(--paper);
+      font-size: 0.85rem; font-family: inherit; outline: none;
+    }
+    select:focus { border-color: var(--paper); }
+
+    button.run-btn {
+      padding: 0.6rem 1.4rem; background: var(--paper); color: var(--ink); border: none;
+      border-radius: 8px; font-size: 0.82rem; font-weight: 700; cursor: pointer;
+      white-space: nowrap; min-height: 38px; transition: opacity 0.15s;
+    }
+    button.run-btn:hover { opacity: 0.85; }
+    button.run-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    .halt-notice {
+      margin-top: 0.9rem; padding: 0.7rem 0.9rem; border-radius: 8px;
+      background: var(--seal-dim); border: 1px solid rgba(193,18,31,0.35);
+      color: var(--paper); font-size: 0.8rem; display: none;
+    }
+    .halt-notice.show { display: block; }
+
+    .help-text { margin-top: 0.7rem; font-size: 0.75rem; color: var(--graphite); line-height: 1.6; }
+
+    /* Tabs */
+    .mode-tabs { display: flex; gap: 0; margin-bottom: 1.25rem; border-bottom: 1px solid var(--rule); }
+    .mode-tab { padding: 0.55rem 1rem; font-size: 0.8rem; font-weight: 600; color: var(--graphite); cursor: pointer; border-bottom: 2px solid transparent; background: none; border-top: none; border-left: none; border-right: none; transition: all 0.15s; }
+    .mode-tab:hover { color: var(--paper); }
+    .mode-tab.active { color: var(--paper); border-bottom-color: var(--paper); }
+    .hidden { display: none; }
+
+    /* Tables */
+    .table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+    .table th { text-align: left; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--rule); font-weight: 600; color: var(--graphite); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .table td { padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--rule); }
+    .table tr:last-child td { border-bottom: none; }
+    .table tr.flagged { background: var(--seal-dim); }
+
+    .badge { display: inline-block; padding: 0.15rem 0.55rem; border-radius: 6px; font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+    .badge-long { background: var(--green-dim); color: var(--green); }
+    .badge-short { background: var(--seal-dim); color: #E0555F; }
+    .badge-neutral { background: rgba(139,141,144,0.15); color: var(--graphite); }
+    .badge-approved { background: var(--green-dim); color: var(--green); }
+    .badge-rejected { background: var(--seal-dim); color: #E0555F; }
+    .badge-dryrun { background: var(--amber-dim); color: var(--amber); }
+
+    .meta { display: flex; gap: 2rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+    .meta-item .value { font-size: 1.15rem; font-weight: 700; }
+    .meta-item .key { font-size: 0.68rem; color: var(--graphite); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 0.15rem; }
+
+    .empty-state { text-align: center; padding: 2.5rem; color: var(--graphite); font-size: 0.85rem; }
+    .log-hash { color: var(--graphite); font-size: 0.72rem; }
+
+    .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(238,238,238,0.3); border-top-color: var(--paper); border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 0.4rem; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .error-box { background: rgba(193, 18, 31, 0.1); border: 1px solid rgba(193, 18, 31, 0.3); border-radius: 8px; padding: 1rem; color: #E0555F; font-size: 0.85rem; margin-bottom: 1rem; }
+
+    footer { text-align: center; padding: 2rem 0 0; color: var(--graphite); font-size: 0.72rem; }
+    footer a { color: var(--paper); text-decoration: none; }
   </style>
 </head>
 <body>
+
+  <div class="strip">
+    <div class="strip-mode">
+      <span class="dot" id="modeDot"></span>
+      <span id="modeLabel">Dry-Run</span>
+    </div>
+    <div class="strip-gauge">
+      <span class="gauge-label">Risk</span>
+      <div class="gauge-track"><div class="gauge-fill" id="gaugeFill" style="width: 0%;"></div></div>
+      <span class="gauge-value num"><span id="gaugeUsed">0</span><span class="dim"> / 500</span></span>
+    </div>
+    <button class="halt-btn" id="haltBtn" onclick="toggleHalt()">Halt</button>
+  </div>
+
   <div class="container">
     <header>
       <h1>AuditTrail Trader</h1>
-      <p>Autonomous AI trading with on-chain audit trail</p>
-      <div id="headerControls" style="margin-top: 0.75rem; display: flex; align-items: center; gap: 0.75rem; justify-content: center;">
-        <span class="badge badge-dry-run" id="modeBadge">DRY-RUN MODE</span>
-        <button class="kill-btn" id="headerKillBtn" onclick="toggleKillSwitch()" style="display:none;">Deactivate Kill Switch</button>
-      </div>
+      <p>Autonomous trading, gated by a risk engine it cannot override.</p>
     </header>
 
     <div class="card">
       <div class="card-title">Trading Control</div>
-      <div class="controls">
-        <div class="field">
-          <label>Assets</label>
-          <div class="chip-group" id="assetChips">
-            <div class="chip selected" data-asset="BTC-USDT-SWAP">BTC-USDT-SWAP</div>
-            <div class="chip selected" data-asset="ETH-USDT-SWAP">ETH-USDT-SWAP</div>
-            <div class="chip" data-asset="SOL-USDT-SWAP">SOL-USDT-SWAP</div>
-            <div class="chip" data-asset="BNB-USDT-SWAP">BNB-USDT-SWAP</div>
-          </div>
-        </div>
+      <div class="chip-row" id="assetChips">
+        <div class="chip selected" data-asset="BTC-USDT-SWAP">BTC</div>
+        <div class="chip selected" data-asset="ETH-USDT-SWAP">ETH</div>
+        <div class="chip" data-asset="SOL-USDT-SWAP">SOL</div>
+        <div class="chip" data-asset="BNB-USDT-SWAP">BNB</div>
+      </div>
+      <div class="controls-row">
         <div class="field">
           <label>Mode</label>
           <select id="tradeMode">
@@ -137,40 +196,52 @@
             <option value="cycle">Continuous Cycle</option>
           </select>
         </div>
-        <button class="run-btn" id="runBtn" onclick="runTradingCycle()">Run Trading Cycle</button>
+        <button class="run-btn" id="runBtn" onclick="runCycle()">Run Trading Cycle</button>
       </div>
-      <div class="help-text">
-        In dry-run mode, no real trades are placed and no on-chain transactions are sent.<br>
-        Configure <code>DRY_RUN=false</code> and wallet credentials to enable live trading.
-      </div>
+      <div class="halt-notice" id="haltNotice">Trading is halted. Resume from the status strip above to run a cycle.</div>
+      <div class="help-text">Dry-run: no real trades are placed and nothing is sent on-chain.</div>
     </div>
 
     <div class="card">
       <div class="mode-tabs">
-        <button class="mode-tab active" onclick="switchTab('cycle')">Trading Cycle</button>
-        <button class="mode-tab" onclick="switchTab('audit')">Audit Trail</button>
-        <button class="mode-tab" onclick="switchTab('stats')">Risk Stats</button>
+        <button class="mode-tab active" onclick="switchTab('cycle', event)">Trading Cycle</button>
+        <button class="mode-tab" onclick="switchTab('audit', event)">Audit Trail</button>
+        <button class="mode-tab" onclick="switchTab('stats', event)">Risk Stats</button>
       </div>
 
       <div id="cycleTab">
-        <div id="cycleResults" class="empty-state">
-          Click "Run Trading Cycle" to generate signals, pass risk checks, log on-chain, and execute trades.
-        </div>
+        <div id="cycleResults" class="empty-state">Run a cycle to see signals, risk decisions and executions here.</div>
       </div>
 
       <div id="auditTab" class="hidden">
-        <div class="card-title">On-Chain Audit Trail</div>
-        <div id="auditResults" class="empty-state">
-          No on-chain audit trail configured.<br>
-          Set <code>XLAYER_RPC_URL</code>, <code>AUDIT_CONTRACT_ADDRESS</code>, and <code>AGENT_WALLET_PRIVATE_KEY</code> to enable.
-        </div>
+        <div class="card-title">Recent On-Chain Decisions</div>
+        <table class="table">
+          <thead><tr><th>Time</th><th>Asset</th><th>Side</th><th>Size</th><th>Hash</th></tr></thead>
+          <tbody id="auditBody">
+            <tr><td colspan="5" class="empty-state">Loading...</td></tr>
+          </tbody>
+        </table>
       </div>
 
       <div id="statsTab" class="hidden">
-        <div class="card-title">Daily Risk Statistics</div>
-        <div id="riskResults" class="empty-state">
-          Risk statistics will appear here after running a trading cycle.
+        <div class="card-title">Daily Risk Limits</div>
+        <div class="meta">
+          <div class="meta-item"><div class="value num" id="statLoss">0.00</div><div class="key">Daily Loss (USD)</div></div>
+          <div class="meta-item"><div class="value num" id="statTrades">0 / 0</div><div class="key">Trades Today</div></div>
+          <div class="meta-item"><div class="value num" id="statPosition">0</div><div class="key">Position (USD)</div></div>
+          <div class="meta-item"><div class="value num" id="statPnl">0.00</div><div class="key">Daily P&amp;L</div></div>
         </div>
+        <div class="card-title" style="margin-top: 1.5rem;">Risk Parameters</div>
+        <table class="table">
+          <thead><tr><th>Parameter</th><th>Limit</th></tr></thead>
+          <tbody id="riskParamsBody">
+            <tr><td>Max Position</td><td class="num">$5,000</td></tr>
+            <tr><td>Max Daily Loss</td><td class="num">$500</td></tr>
+            <tr><td>Max Daily Trades</td><td class="num">10</td></tr>
+            <tr><td>Max Leverage</td><td class="num">5.0x</td></tr>
+            <tr><td>Min Confidence</td><td class="num">70%</td></tr>
+          </tbody>
+        </table>
       </div>
 
       <div id="errorBox" class="error-box hidden"></div>
@@ -178,227 +249,68 @@
   </div>
 
   <footer>
-    AuditTrail Trader &middot; OKX.AI Agent &middot;
-    <a href="/manifest" target="_blank">Manifest</a> &middot;
-    <a href="/docs" target="_blank">API Docs</a>
+    AuditTrail Trader &middot; OKX.AI Agent &middot; <a href="/manifest" target="_blank">Manifest</a> &middot; <a href="/docs" target="_blank">API Docs</a>
   </footer>
 
   <script>
-    let currentTab = 'cycle';
+    let halted = false;
     let dryRun = true;
-    let killSwitchReason = '';
+    let dailyLoss = 0;
+    const dailyLossLimit = 500;
 
-    function switchTab(tab) {
-      currentTab = tab;
-      document.querySelectorAll('.mode-tab').forEach(t => t.classList.remove('active'));
-      event.currentTarget.classList.add('active');
-      document.getElementById('cycleTab').classList.toggle('hidden', tab !== 'cycle');
-      document.getElementById('auditTab').classList.toggle('hidden', tab !== 'audit');
-      document.getElementById('statsTab').classList.toggle('hidden', tab !== 'stats');
+    function updateGauge() {
+      const pct = Math.min(100, (dailyLoss / dailyLossLimit) * 100);
+      const fill = document.getElementById('gaugeFill');
+      fill.style.width = pct + '%';
+      fill.className = 'gauge-fill' + (pct >= 90 ? ' danger' : pct >= 60 ? ' warn' : '');
+      document.getElementById('gaugeUsed').textContent = dailyLoss.toFixed(0);
     }
 
-    function getSelectedAssets() {
-      const chips = document.querySelectorAll('#assetChips .chip.selected');
-      return Array.from(chips).map(c => c.getAttribute('data-asset'));
-    }
+    function updateModeIndicator() {
+      const dot = document.getElementById('modeDot');
+      const label = document.getElementById('modeLabel');
+      const haltBtn = document.getElementById('haltBtn');
+      const runBtn = document.getElementById('runBtn');
+      const notice = document.getElementById('haltNotice');
 
-    function initAssetChips() {
-      const chips = document.querySelectorAll('#assetChips .chip');
-      chips.forEach(chip => {
-        chip.addEventListener('click', function(e) {
-          e.stopPropagation();
-          chip.classList.toggle('selected');
-        });
-      });
-    }
-
-    function renderSignal(sig) {
-      let cls = 'signal-neutral';
-      if (sig.action === 'LONG') cls = 'signal-long';
-      else if (sig.action === 'SHORT') cls = 'signal-short';
-      return '<span class="signal-badge ' + cls + '">' + sig.action + '</span> <span style="color: var(--text-dim);">(' + Math.round(sig.confidence * 100) + '%)</span>';
-    }
-
-    function renderCycleResult(result) {
-      dryRun = result.dry_run;
-      document.getElementById('modeBadge').textContent = dryRun ? 'DRY-RUN MODE' : 'LIVE MODE';
-      document.getElementById('modeBadge').className = 'badge ' + (dryRun ? 'badge-dry-run' : 'badge-live');
-
-      const container = document.getElementById('cycleResults');
-      container.classList.remove('hidden', 'empty-state');
-
-      let html = '';
-
-      // Error summary at the top if any errors
-      if (result.errors && result.errors.length > 0) {
-        html += '<div class="card-title">Errors</div>';
-        html += '<div style="margin-bottom: 1rem;">';
-        result.errors.forEach(function(err) {
-          html += '<div style="color: var(--red); font-size: 0.8rem; margin-bottom: 0.25rem;">' + err + '</div>';
-        });
-        html += '</div>';
-      }
-
-      html += '<div style="margin-bottom: 1rem;"><strong>Cycle ID:</strong> ' + result.cycle_id + '</div>';
-      html += '<div style="margin-bottom: 1rem;"><strong>Timestamp:</strong> ' + new Date(result.timestamp * 1000).toLocaleString() + '</div>';
-      html += '<div style="margin-bottom: 1.5rem;"><strong>Status:</strong> <span class="status-badge status-dry-run">' + (result.dry_run ? 'DRY-RUN' : 'LIVE') + '</span></div>';
-
-      html += '<div class="card-title">Signals</div>';
-      html += '<table class="table"><thead><tr><th>Asset</th><th>Signal</th><th>Confidence</th><th>Rationale</th></tr></thead><tbody>';
-      (result.signals || []).forEach(sig => {
-        html += '<tr><td>' + sig.asset + '</td><td>' + renderSignal(sig) + '</td><td>' + Math.round(sig.confidence * 100) + '%</td><td style="color: var(--text-dim); font-size: 0.75rem;">' + (sig.rationale || '') + '</td></tr>';
-      });
-      html += '</tbody></table>';
-
-      html += '<div class="card-title" style="margin-top: 1.5rem;">Risk Decisions</div>';
-      if (result.decisions && result.decisions.length > 0) {
-        html += '<table class="table"><thead><tr><th>Asset</th><th>Side</th><th>Size (USD)</th><th>Confidence</th><th>Status</th><th>Risk Hash</th></tr></thead><tbody>';
-        result.decisions.forEach(dec => {
-          let statusCls = 'status-dry-run';
-          let rowCls = '';
-          if (dec.status === 'approved') { statusCls = 'status-approved'; }
-          else if (dec.status === 'rejected') { statusCls = 'status-rejected'; rowCls = 'row-rejected'; }
-          html += '<tr class="' + rowCls + '"><td>' + dec.asset + '</td><td>' + (dec.side || '-') + '</td><td>' + (dec.size_usd ? dec.size_usd.toFixed(0) : '-') + '</td><td>' + Math.round((dec.confidence || 0) * 100) + '%</td><td><span class="status-badge ' + statusCls + '">' + dec.status + '</span></td><td class="log-hash">' + (dec.risk_hash ? dec.risk_hash.substring(0, 10) + '...' : '-') + '</td></tr>';
-        });
-        html += '</tbody></table>';
+      if (halted) {
+        dot.className = 'dot halted';
+        label.textContent = 'Halted';
+        haltBtn.textContent = 'Resume';
+        haltBtn.classList.add('active');
+        runBtn.disabled = true;
+        notice.classList.add('show');
       } else {
-        html += '<div class="empty-state">No decisions in this cycle</div>';
-      }
-
-      html += '<div class="card-title" style="margin-top: 1.5rem;">Executions</div>';
-      if (result.executions && result.executions.length > 0) {
-        html += '<table class="table"><thead><tr><th>Asset</th><th>Side</th><th>Size (USD)</th><th>Price</th><th>Tx Hash</th><th>Status</th></tr></thead><tbody>';
-        result.executions.forEach(ex => {
-          let statusCls = 'status-dry-run';
-          let rowCls = '';
-          if (ex.status === 'success') { statusCls = 'status-approved'; }
-          else if (ex.status === 'failed') { statusCls = 'status-rejected'; rowCls = 'row-rejected'; }
-          html += '<tr class="' + rowCls + '"><td>' + ex.asset + '</td><td>' + (ex.side || '-') + '</td><td>' + (ex.size_usd ? ex.size_usd.toFixed(0) : '-') + '</td><td>' + (ex.fill_price || '-') + '</td><td class="log-hash">' + (ex.tx_hash ? ex.tx_hash.substring(0, 10) + '...' : 'N/A') + '</td><td><span class="status-badge ' + statusCls + '">' + ex.status + '</span></td></tr>';
-        });
-        html += '</tbody></table>';
-      } else {
-        html += '<div class="empty-state">No executions in this cycle (dry-run mode)</div>';
-      }
-
-      if (result.total_pnl_usd !== undefined) {
-        html += '<div class="card-title" style="margin-top: 1.5rem;">Cycle Summary</div>';
-        html += '<div class="meta">';
-        html += '<div class="meta-item"><div class="value" style="' + (result.total_pnl_usd >= 0 ? '' : 'color: var(--red);') + '">' + result.total_pnl_usd.toFixed(2) + ' USDT</div><div class="key">Total P&L</div></div>';
-        html += '<div class="meta-item"><div class="value" style="color: var(--text-dim);">' + result.total_fees_usd.toFixed(2) + ' USDT</div><div class="key">Total Fees</div></div>';
-        html += '<div class="meta-item"><div class="value">' + (result.errors ? result.errors.length : 0) + '</div><div class="key">Errors</div></div>';
-        html += '</div>';
-      }
-
-      container.innerHTML = html;
-    }
-
-    function renderAuditStats(stats) {
-      const container = document.getElementById('auditResults');
-      container.classList.remove('hidden', 'empty-state');
-
-      let html = '<div class="card-title">Contract Statistics</div>';
-      html += '<div class="meta">';
-      html += '<div class="meta-item"><div class="value">' + (stats.total_decisions || 0) + '</div><div class="key">Total Decisions</div></div>';
-      html += '<div class="meta-item"><div class="value">' + (stats.total_executions || 0) + '</div><div class="key">Total Executions</div></div>';
-      html += '<div class="meta-item"><div class="value">' + (stats.total_rejected || 0) + '</div><div class="key">Rejected</div></div>';
-      html += '<div class="meta-item"><div class="value">' + (stats.consecutive_successes || 0) + '</div><div class="key">Consecutive Successes</div></div>';
-      html += '</div>';
-
-      if (stats.last_decision) {
-        html += '<div class="card-title" style="margin-top: 1.5rem;">Last Decision</div>';
-        html += '<table class="table"><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>';
-        html += '<tr><td>Timestamp</td><td>' + new Date(stats.last_decision.timestamp).toLocaleString() + '</td></tr>';
-        html += '<tr><td>Agent</td><td>' + (stats.last_decision.agent_id || '-') + '</td></tr>';
-        html += '<tr><td>Action</td><td>' + stats.last_decision.asset + ' ' + (stats.last_decision.side || '-') + ' ' + (stats.last_decision.size_usd || '-') + '</td></tr>';
-        html += '<tr><td>Risk Hash</td><td class="log-hash">' + (stats.last_decision.risk_hash || '-') + '</td></tr>';
-        html += '</tbody></table>';
-      }
-
-      if (stats.recent_decisions && stats.recent_decisions.length > 0) {
-        html += '<div class="card-title" style="margin-top: 1.5rem;">Recent On-Chain Decisions</div>';
-        html += '<table class="table"><thead><tr><th>Time</th><th>Agent</th><th>Asset</th><th>Side</th><th>Size</th><th>Hash</th></tr></thead><tbody>';
-        stats.recent_decisions.slice(0, 10).forEach(d => {
-          html += '<tr><td>' + new Date(d.timestamp).toLocaleTimeString() + '</td><td>' + (d.agent_id || '-') + '</td><td>' + d.asset + '</td><td>' + (d.side || '-') + '</td><td>' + (d.size_usd || '-') + '</td><td class="log-hash">' + (d.risk_hash ? d.risk_hash.substring(0, 10) + '...' : '-') + '</td></tr>';
-        });
-        html += '</tbody></table>';
-      }
-
-      container.innerHTML = html;
-    }
-
-    function renderRiskStats(stats) {
-      const container = document.getElementById('riskResults');
-      container.classList.remove('hidden', 'empty-state');
-
-      const pnlColor = stats.daily_pnl_usd >= 0 ? '' : 'color: var(--red);';
-      const lossColor = stats.daily_loss_usd >= 0 ? '' : 'color: var(--red);';
-
-      let html = '<div class="card-title">Daily Risk Limits</div>';
-      html += '<div class="meta">';
-      html += '<div class="meta-item"><div class="value" style="' + lossColor + '">' + stats.daily_loss_usd.toFixed(2) + '</div><div class="key">Daily Loss (USD)</div></div>';
-      html += '<div class="meta-item"><div class="value">' + stats.daily_trade_count + '/' + stats.max_daily_trades + '</div><div class="key">Trades Today</div></div>';
-      html += '<div class="meta-item"><div class="value">' + stats.position_size_usd.toFixed(0) + '</div><div class="key">Position (USD)</div></div>';
-      html += '<div class="meta-item"><div class="value" style="' + pnlColor + '">' + stats.daily_pnl_usd.toFixed(2) + '</div><div class="key">Daily P&L</div></div>';
-      html += '</div>';
-
-      html += '<div class="card-title" style="margin-top: 1.5rem;">Risk Parameters</div>';
-      html += '<table class="table"><thead><tr><th>Parameter</th><th>Limit</th></tr></thead><tbody>';
-      html += '<tr><td>Max Position</td><td>$' + stats.max_position_usd.toFixed(0) + '</td></tr>';
-      html += '<tr><td>Max Daily Loss</td><td>$' + stats.max_daily_loss_usd.toFixed(0) + '</td></tr>';
-      html += '<tr><td>Max Daily Trades</td><td>' + stats.max_daily_trades + '</td></tr>';
-      html += '<tr><td>Max Leverage</td><td>' + stats.max_leverage.toFixed(1) + 'x</td></tr>';
-      html += '<tr><td>Min Confidence</td><td>' + (stats.min_confidence_bps / 100).toFixed(1) + '%</td></tr>';
-      html += '</tbody></table>';
-
-      container.innerHTML = html;
-    }
-
-    function showError(msg) {
-      const box = document.getElementById('errorBox');
-      box.textContent = msg;
-      box.classList.remove('hidden');
-    }
-
-    function hideError() {
-      document.getElementById('errorBox').classList.add('hidden');
-    }
-
-    function updateKillSwitchHeader(isActive, reason) {
-      const btn = document.getElementById('headerKillBtn');
-      if (isActive) {
-        btn.style.display = 'inline-block';
-        btn.textContent = 'Deactivate Kill Switch';
-        btn.className = 'kill-btn kill-inactive';
-        killSwitchReason = reason || '';
-      } else {
-        btn.style.display = 'none';
+        dot.className = 'dot' + (dryRun ? '' : ' live');
+        label.textContent = dryRun ? 'Dry-Run' : 'Live';
+        haltBtn.textContent = 'Halt';
+        haltBtn.classList.remove('active');
+        runBtn.disabled = false;
+        notice.classList.remove('show');
       }
     }
 
-    async function toggleKillSwitch() {
-      const btn = document.getElementById('headerKillBtn');
-      const isActive = btn.textContent.includes('Deactivate');
-      
+    async function toggleHalt() {
+      const btn = document.getElementById('haltBtn');
+      hideError();
+
       try {
-        let res, data;
-        if (isActive) {
-          // Deactivate - no reason needed
-          res = await fetch('/kill-switch/deactivate', { method: 'POST' });
-          data = await res.json();
+        if (halted) {
+          // Resume — call deactivate endpoint
+          const res = await fetch('/kill-switch/deactivate', { method: 'POST' });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || data.error || 'Failed to deactivate kill switch');
         } else {
-          // Activate - need reason
-          const reason = await promptForReason();
-          if (!reason) return;
-          res = await fetch('/kill-switch/activate', {
+          // Halt — ask for reason then activate
+          const reason = window.prompt('Enter kill switch reason (required):');
+          if (!reason || !reason.trim()) return;
+          const res = await fetch('/kill-switch/activate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ reason: reason }),
+            body: JSON.stringify({ reason: reason.trim() }),
           });
-          data = await res.json();
-        }
-
-        if (!res.ok) {
-          throw new Error(data.detail || data.error || ('Request failed (' + res.status + ')'));
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || data.error || 'Failed to activate kill switch');
         }
 
         await loadStats();
@@ -407,18 +319,33 @@
       }
     }
 
-    function promptForReason() {
-      return new Promise(resolve => {
-        const reason = window.prompt('Enter kill switch reason (required):');
-        resolve(reason ? reason.trim() : '');
-      });
+    document.querySelectorAll('.chip').forEach(chip => {
+      chip.addEventListener('click', () => chip.classList.toggle('selected'));
+    });
+
+    function switchTab(tab, evt) {
+      document.querySelectorAll('.mode-tab').forEach(t => t.classList.remove('active'));
+      evt.currentTarget.classList.add('active');
+      document.getElementById('cycleTab').classList.toggle('hidden', tab !== 'cycle');
+      document.getElementById('auditTab').classList.toggle('hidden', tab !== 'audit');
+      document.getElementById('statsTab').classList.toggle('hidden', tab !== 'stats');
     }
 
-    async function runTradingCycle() {
+    function badgeFor(kind, value) {
+      const map = {
+        signal: { LONG: 'badge-long', SHORT: 'badge-short', NEUTRAL: 'badge-neutral' },
+        status: { approved: 'badge-approved', rejected: 'badge-rejected', 'dry-run': 'badge-dryrun', success: 'badge-approved' },
+      };
+      return '<span class="badge ' + (map[kind][value] || 'badge-neutral') + '">' + value + '</span>';
+    }
+
+    async function runCycle() {
+      if (halted) return;
       const btn = document.getElementById('runBtn');
       hideError();
 
-      const assets = getSelectedAssets();
+      const assets = Array.from(document.querySelectorAll('#assetChips .chip.selected'))
+                          .map(c => c.getAttribute('data-asset'));
       if (!assets.length) {
         showError('Please select at least one asset.');
         return;
@@ -442,15 +369,6 @@
         }
 
         renderCycleResult(data);
-
-        if (mode === 'single') {
-          const riskRes = await fetch('/risk-stats');
-          if (riskRes.ok) {
-            const riskData = await riskRes.json();
-            renderRiskStats(riskData);
-            updateKillSwitchHeader(riskData.kill_switch?.active || false, riskData.kill_switch?.reason);
-          }
-        }
       } catch (err) {
         showError('Network error: ' + err.message);
       } finally {
@@ -459,29 +377,131 @@
       }
     }
 
+    function renderCycleResult(result) {
+      dryRun = result.dry_run;
+      dailyLoss = result.total_pnl_usd < 0 ? Math.abs(result.total_pnl_usd) : 0;
+      updateGauge();
+      updateModeIndicator();
+
+      const container = document.getElementById('cycleResults');
+      container.classList.remove('hidden', 'empty-state');
+
+      let html = '';
+
+      if (result.errors && result.errors.length > 0) {
+        html += '<div class="card-title">Errors</div><div style="margin-bottom: 1rem;">';
+        result.errors.forEach(err => {
+          html += '<div style="color: #E0555F; font-size: 0.8rem; margin-bottom: 0.25rem;">' + err + '</div>';
+        });
+        html += '</div>';
+      }
+
+      html += '<div style="margin-bottom: 1rem;"><strong>Cycle ID:</strong> ' + result.cycle_id + '</div>';
+      html += '<div style="margin-bottom: 1rem;"><strong>Timestamp:</strong> ' + new Date(result.timestamp * 1000).toLocaleString() + '</div>';
+
+      // Signals
+      html += '<div class="card-title">Signals</div>';
+      html += '<table class="table"><thead><tr><th>Asset</th><th>Signal</th><th>Confidence</th><th>Rationale</th></tr></thead><tbody>';
+      (result.signals || []).forEach(sig => {
+        html += '<tr><td>' + sig.asset + '</td><td>' + badgeFor('signal', sig.action) + '</td><td class="num">' + Math.round(sig.confidence * 100) + '%</td><td style="color: var(--graphite); font-size: 0.75rem;">' + (sig.rationale || '') + '</td></tr>';
+      });
+      html += '</tbody></table>';
+
+      // Risk decisions with visual rejection flags
+      html += '<div class="card-title" style="margin-top: 1.5rem;">Risk Decisions</div>';
+      if (result.decisions && result.decisions.length > 0) {
+        html += '<table class="table"><thead><tr><th>Asset</th><th>Side</th><th>Size (USD)</th><th>Confidence</th><th>Status</th><th>Hash</th></tr></thead><tbody>';
+        result.decisions.forEach(dec => {
+          const rowCls = dec.status === 'rejected' ? ' class="flagged"' : '';
+          html += '<tr' + rowCls + '><td>' + dec.asset + '</td><td>' + (dec.side || '-') + '</td><td class="num">' + (dec.size_usd ? dec.size_usd.toFixed(0) : '-') + '</td><td class="num">' + Math.round((dec.confidence || 0) * 100) + '%</td><td>' + badgeFor('status', dec.status) + '</td><td class="log-hash num">' + (dec.risk_hash ? dec.risk_hash.substring(0, 10) + '...' : '-') + '</td></tr>';
+        });
+        html += '</tbody></table>';
+      } else {
+        html += '<div class="empty-state">No decisions in this cycle</div>';
+      }
+
+      // Executions
+      html += '<div class="card-title" style="margin-top: 1.5rem;">Executions</div>';
+      if (result.executions && result.executions.length > 0) {
+        html += '<table class="table"><thead><tr><th>Asset</th><th>Side</th><th>Size (USD)</th><th>Price</th><th>Tx Hash</th><th>Status</th></tr></thead><tbody>';
+        result.executions.forEach(ex => {
+          html += '<tr><td>' + ex.asset + '</td><td>' + (ex.side || '-') + '</td><td class="num">' + (ex.size_usd ? ex.size_usd.toFixed(0) : '-') + '</td><td class="num">' + (ex.fill_price || '-') + '</td><td class="log-hash num">' + (ex.tx_hash ? ex.tx_hash.substring(0, 10) + '...' : 'N/A') + '</td><td>' + badgeFor('status', ex.status) + '</td></tr>';
+        });
+        html += '</tbody></table>';
+      } else {
+        html += '<div class="empty-state">No executions in this cycle (dry-run mode)</div>';
+      }
+
+      if (result.total_pnl_usd !== undefined) {
+        html += '<div class="card-title" style="margin-top: 1.5rem;">Cycle Summary</div>';
+        html += '<div class="meta">';
+        const pnlColor = result.total_pnl_usd >= 0 ? 'color: var(--green);' : 'color: #E0555F;';
+        html += '<div class="meta-item"><div class="value num" style="' + pnlColor + '">' + result.total_pnl_usd.toFixed(2) + ' USDT</div><div class="key">Total P&amp;L</div></div>';
+        html += '<div class="meta-item"><div class="value num" style="color: var(--graphite);">' + result.total_fees_usd.toFixed(2) + ' USDT</div><div class="key">Total Fees</div></div>';
+        html += '<div class="meta-item"><div class="value num">' + (result.errors ? result.errors.length : 0) + '</div><div class="key">Errors</div></div>';
+        html += '</div>';
+      }
+
+      container.innerHTML = html;
+    }
+
     async function loadStats() {
       try {
         const riskRes = await fetch('/risk-stats');
         if (riskRes.ok) {
-          const riskData = await riskRes.json();
-          renderRiskStats(riskData);
-          if (currentTab === 'stats') {
-            const ks = riskData.kill_switch || { active: false, reason: null };
-            updateKillSwitchHeader(ks.active, ks.reason);
+          const stats = await riskRes.json();
+          dailyLoss = stats.daily_loss_usd || 0;
+          halted = stats.kill_switch?.active || false;
+          updateGauge();
+          updateModeIndicator();
+
+          document.getElementById('statLoss').textContent = dailyLoss.toFixed(0);
+          document.getElementById('statTrades').textContent = stats.daily_trade_count + ' / ' + stats.max_daily_trades;
+          document.getElementById('statPosition').textContent = stats.position_size_usd.toFixed(0);
+          document.getElementById('statPnl').textContent = stats.daily_pnl_usd.toFixed(2);
+          if (stats.daily_pnl_usd >= 0) {
+            document.getElementById('statPnl').style.color = 'var(--green)';
+          } else {
+            document.getElementById('statPnl').style.color = '#E0555F';
           }
+
+          document.getElementById('riskParamsBody').innerHTML =
+            '<tr><td>Max Position</td><td class="num">$' + stats.max_position_usd.toFixed(0) + '</td></tr>' +
+            '<tr><td>Max Daily Loss</td><td class="num">$' + stats.max_daily_loss_usd.toFixed(0) + '</td></tr>' +
+            '<tr><td>Max Daily Trades</td><td class="num">' + stats.max_daily_trades + '</td></tr>' +
+            '<tr><td>Max Leverage</td><td class="num">' + stats.max_leverage.toFixed(1) + 'x</td></tr>' +
+            '<tr><td>Min Confidence</td><td class="num">' + (stats.min_confidence_bps / 100).toFixed(1) + '%</td></tr>';
         }
 
         const auditRes = await fetch('/audit-stats?days=7');
         if (auditRes.ok) {
-          const auditData = await auditRes.json();
-          renderAuditStats(auditData);
+          const audit = await auditRes.json();
+          const body = document.getElementById('auditBody');
+          if (audit.decisions && audit.decisions.length > 0) {
+            body.innerHTML = audit.decisions.slice(0, 10).map(d =>
+              '<tr><td class="num">' + new Date(d.timestamp * 1000).toLocaleTimeString() + '</td><td>' + d.asset + '</td><td>' + (d.side || '-') + '</td><td class="num">' + (d.size_usd || 0).toFixed(0) + '</td><td class="log-hash num">' + (d.risk_hash ? d.risk_hash.substring(0, 10) + '...' : '-') + '</td></tr>'
+            ).join('');
+          } else {
+            body.innerHTML = '<tr><td colspan="5" class="empty-state">No on-chain decisions yet</td></tr>';
+          }
         }
       } catch (err) {
         console.error('Failed to load stats:', err);
       }
     }
 
-    initAssetChips();
+    function showError(msg) {
+      const box = document.getElementById('errorBox');
+      box.textContent = msg;
+      box.classList.remove('hidden');
+    }
+
+    function hideError() {
+      document.getElementById('errorBox').classList.add('hidden');
+    }
+
+    updateGauge();
+    updateModeIndicator();
     loadStats();
   </script>
 </body>

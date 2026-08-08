@@ -1,0 +1,28 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "source": "src/main.py",
+      "use": "@vercel/python",
+      "config": {
+        "maxLambdaSize": "50mb"
+      }
+    }
+  ],
+  "routes": [
+    {
+      "source": "/static/(.*)",
+      "headers": { "cache-control": "s-max-age=31536000,immutable" },
+      "serve": "/static/$1"
+    },
+    {
+      "source": "/(.*)",
+      "dest": "/src/main.py"
+    }
+  ],
+  "env": {
+    "XLAYER_RPC_URL": "https://xlayertestrpc.okx.com/",
+    "AUDIT_CONTRACT_ADDRESS": "0x6019b96e9d0Ba17588eb22579d9c2dEf0473d07c",
+    "DRY_RUN": "true"
+  }
+}

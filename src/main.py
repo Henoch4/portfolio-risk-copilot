@@ -176,9 +176,9 @@ def _make_risk_gate() -> RiskGate:
 
 def _make_onchain_logger() -> OnchainLogger | None:
     """Create onchain logger if configured. Returns None if not configured."""
-    rpc_url = os.getenv("XLAYER_RPC_URL")
-    contract_addr = os.getenv("AUDIT_CONTRACT_ADDRESS")
-    private_key = os.getenv("AGENT_WALLET_PRIVATE_KEY")
+    rpc_url = os.getenv("XLAYER_RPC_URL", "").strip()
+    contract_addr = os.getenv("AUDIT_CONTRACT_ADDRESS", "").strip()
+    private_key = os.getenv("AGENT_WALLET_PRIVATE_KEY", "").strip()
     if not all([rpc_url, contract_addr, private_key]):
         return None
     return OnchainLogger(
@@ -264,13 +264,13 @@ async def trade(req: TradeRequest):
 
 
 @app.get("/audit-stats")
-async def audit_stats(req: AuditStatsRequest):
+async def audit_stats(days: int = 7):
     """Query onchain audit trail for recent decisions and executions."""
     if not _onchain_logger:
         return {"error": "Onchain logger not configured. Set XLAYER_RPC_URL, AUDIT_CONTRACT_ADDRESS, and AGENT_WALLET_PRIVATE_KEY."}
     
     try:
-        stats = _onchain_logger.get_contract_stats(days=req.days)
+        stats = _onchain_logger.get_contract_stats(days=days)
         return stats
     except Exception as e:
         raise HTTPException(500, f"Audit query failed: {e}")

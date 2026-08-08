@@ -65,6 +65,7 @@ contract TradeAuditTrail {
 
     mapping(bytes32 => bool)        public decisionLogged;
     mapping(bytes32 => bool)        public decisionExecuted;
+    mapping(bytes32 => uint256)     public decisionIndex;
     mapping(address => uint256)     public dailyVolume;
     mapping(address => uint256)     public dailyLoss;
     mapping(address => uint256)     public dailyTrades;
@@ -189,7 +190,17 @@ contract TradeAuditTrail {
         RiskParams storage p = agentRiskParams[msg.sender];
         require(p.maxPositionSizeUsd > 0, "risk params not set");
         require(input.sizeUsd <= p.maxPositionSizeUsd, "EXCEEDS_MAX_POSITION_SIZE");
+        require(input.confidence >= 0, "NEGATIVE_CONFIDENCE");
         require(uint256(input.confidence) >= p.minConfidenceBps, "BELOW_MIN_CONFIDENCE");
+
+        // Leverage check: effective leverage = sizeUsd / (position_cap / maxLeverage)
+        // If sizeUsd * 10000 > maxPositionSizeUsd * maxLeverageBps, the implied
+        // leverage exceeds the cap. E.g., maxPosition=5000, maxLeverage=5x (50000 bps):
+        // size cannot exceed 5000 * 50000 / 10000 = 25000.
+        if (p.maxPositionSizeUsd > 0 && p.maxLeverageBps > 0) {
+            uint256 maxAllowed = (p.maxPositionSizeUsd * p.maxLeverageBps) / 10000;
+            require(input.sizeUsd <= maxAllowed, "EXCEEDS_MAX_LEVERAGE");
+        }
 
         // Daily reset: the original version only recorded the current block
         // number and never zeroed the counters, so "daily" limits were
@@ -207,6 +218,7 @@ contract TradeAuditTrail {
         require(dailyLoss[msg.sender] < p.maxDailyLossUsd, "DAILY_LOSS_LIMIT_EXCEEDED");
 
         decisionLogged[decisionId] = true;
+        decisionIndex[decisionId] = decisions.length;
         lastDecisionId[msg.sender] = decisionId;
         dailyTrades[msg.sender]++;
         dailyVolume[msg.sender] += input.sizeUsd;
@@ -253,8 +265,8 @@ contract TradeAuditTrail {
         require(decisionLogged[decisionId], "decision not logged");
         require(!decisionExecuted[decisionId], "execution already recorded");
 
-        uint256 len = decisions.length;
-        TradeDecision storage d = decisions[len - 1];
+        uint256 idx = decisionIndex[decisionId];
+        TradeDecision storage d = decisions[idx];
         require(d.decisionId == decisionId, "decision mismatch");
 
         d.executed = true;
@@ -270,9 +282,12 @@ contract TradeAuditTrail {
         if (success) {
             uint256 lossUsd = 0;
             if (!d.isShort && fillPrice < d.entryPrice) {
-                lossUsd = (d.entryPrice - fillPrice) * d.sizeUsd / 1e8;
+                // Round up: (a - b) * s / 1e8 with ceiling division
+                uint256 diff = d.entryPrice - fillPrice;
+                lossUsd = (diff * d.sizeUsd + 1e8 - 1) / 1e8;
             } else if (d.isShort && fillPrice > d.entryPrice) {
-                lossUsd = (fillPrice - d.entryPrice) * d.sizeUsd / 1e8;
+                uint256 diff = fillPrice - d.entryPrice;
+                lossUsd = (diff * d.sizeUsd + 1e8 - 1) / 1e8;
             }
             if (lossUsd > 0) {
                 dailyLoss[msg.sender] += lossUsd;

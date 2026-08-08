@@ -347,7 +347,7 @@ class OnchainLogger:
     def is_kill_switch_active(self) -> bool:
         return bool(self.contract.functions.killSwitchActive(self.agent_address).call())
 
-     def get_decision(self, decision_id: str) -> dict:
+    def get_decision(self, decision_id: str) -> dict:
         """Query a decision from the contract by ID."""
         decision_id_hash = Web.keccak(text=decision_id)
         try:
