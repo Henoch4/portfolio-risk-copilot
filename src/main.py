@@ -45,6 +45,9 @@ from .okx_cli import OkxCli, OkxCliConfig, OkxCliError
 from .execution import RiskGate
 from .agent import AutonomousTradingAgent
 from .audit_logger import OnchainLogger
+from .audit_trail import AuditLog
+from .curator import CuratorAgent
+from .data_integrity import DataIntegrityGate
 
 
 # Safety guard: live-account audits are opt-in at the PROCESS level.
@@ -233,10 +236,23 @@ def _make_onchain_logger() -> OnchainLogger | None:
         chain_id=int(os.getenv("XLAYER_CHAIN_ID", "1952")),
     )
 
+def _make_curator() -> CuratorAgent | None:
+    """Create the curator from config/profiles.yaml. None if the file is absent
+    (the trading agent falls back to its neutral defaults)."""
+    profiles_path = pathlib.Path(__file__).resolve().parent.parent / "config" / "profiles.yaml"
+    if not profiles_path.exists():
+        return None
+    return CuratorAgent(profiles_path, audit_log=_audit_log)
+
 _dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
 _risk_gate = _make_risk_gate()
 _onchain_logger = _make_onchain_logger()
 _cli = OkxCli(OkxCliConfig(demo=not _dry_run))
+_audit_log = AuditLog(path=os.getenv("AUDIT_LOG_PATH", "audit_log.jsonl"))
+_curator = _make_curator()
+_integrity_gate = DataIntegrityGate(
+    staleness_threshold_s=float(os.getenv("DATA_STALENESS_SECONDS", "30")),
+)
 _trading_agent = AutonomousTradingAgent(
     okx_cli=_cli,
     risk_gate=_risk_gate,
@@ -246,6 +262,9 @@ _trading_agent = AutonomousTradingAgent(
     agent_id=os.getenv("AGENT_ID", "autonomous-trader-001"),
     sizing_mode=os.getenv("SIZING_MODE", "kelly"),
     kelly_fraction=float(os.getenv("KELLY_FRACTION", "0.5")),
+    integrity_gate=_integrity_gate,
+    curator=_curator,
+    audit_log=_audit_log,
 )
 
 
@@ -354,6 +373,40 @@ async def risk_stats():
         "max_leverage": _risk_gate.max_leverage,
         "min_confidence_bps": _risk_gate.min_confidence_bps,
         "kill_switch": _risk_gate.kill_switch_status(),
+    }
+
+
+@app.get("/api/v1/validation")
+async def validation_status():
+    """Read-only: the strategy-validation pipeline gate (walk-forward + PBO +
+    Calmar). `last_report` stays null until production wiring persists a
+    validation_report() — an honest null beats a fabricated backtest."""
+    return {
+        "pipeline": "validation_report (walk-forward + PBO + Calmar bar)",
+        "wired": True,
+        "calmar_bar": 1.0,
+        "pbo_max": 0.5,
+        "last_report": None,
+        "cleared_for_paper_trading": None,
+        "dry_run": _dry_run,
+    }
+
+
+@app.get("/api/v1/curator-profile")
+async def curator_profile():
+    """Read-only: active curator profile with the resolve knobs for the next
+    cycle (profile defaults, overridden per-knob by CURATOR_* env vars)."""
+    curator = _trading_agent.curator
+    if not curator:
+        return {"enabled": False, "defaults": "neutral (no profiles.yaml)"}
+    resolved = _trading_agent._resolve_curator_profile()
+    return {
+        "enabled": True,
+        "current_profile": curator.state.current_profile,
+        "default_profile": curator.default_profile,
+        "allowlist": sorted(curator.profiles.keys()),
+        "knobs": resolved if resolved is not None else None,
+        "cooldown_cycles": curator.cooldown_cycles,
     }
 
 

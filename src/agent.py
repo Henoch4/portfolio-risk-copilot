@@ -39,6 +39,9 @@ from .execution import (
 )
 from .audit_logger import OnchainLogger, DecisionPayload
 from .okx_cli import OkxCli, OkxCliConfig, OkxCliError
+from .audit_trail import AuditLog
+from .curator import CuratorAgent, apply_env_overrides
+from .data_integrity import DataIntegrityGate, IntegrityResult, MarketTick, Severity
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,7 @@ class TradingCycleResult:
     total_fees_usd: float = 0.0
     status: str = "completed"
     errors: list[str] = field(default_factory=list)
+    curator: dict | None = None
 
 
 class AutonomousTradingAgent:
@@ -81,6 +85,10 @@ class AutonomousTradingAgent:
         enable_momentum: bool = False,
         sizing_mode: str = "kelly",
         kelly_fraction: float = 0.5,
+        integrity_gate: DataIntegrityGate | None = None,
+        curator: CuratorAgent | None = None,
+        audit_log: AuditLog | None = None,
+        expected_equity: float | None = None,
     ):
         self.cli = okx_cli
         self.risk_gate = risk_gate
@@ -93,6 +101,22 @@ class AutonomousTradingAgent:
         # Off by default — see _generate_signals docstring. Momentum is a
         # phase-2+ strategy per the design doc's Section 0 MVP scope.
         self.enable_momentum = enable_momentum
+
+        # Pre-signal integrity gate (runs BEFORE signal generation), curator
+        # profile selector, and the local append-only audit log. All optional
+        # and fail-open only in the sense that absence disables the feature —
+        # when present, a HARD_BLOCK blocks the asset for the whole cycle.
+        self.integrity_gate = integrity_gate
+        self.curator = curator
+        self.audit_log = audit_log
+        self.expected_equity = expected_equity
+
+        # Resolved curator knobs for the current cycle, forwarded to sizing /
+        # signal filtering. Defaults (no curator, or knob untouched by env)
+        # are neutral: multiplier 1.0, no extra confidence floor, all signals.
+        self._position_size_multiplier: float = 1.0
+        self._confidence_floor_bps: int | None = None
+        self._enabled_signals: set[str] | None = None
 
         self.executor = OrderExecutor(
             cli=okx_cli,
@@ -172,6 +196,72 @@ class AutonomousTradingAgent:
             price_data = [{"close": 1.0, "volume": 0.0}]
         return price_data
 
+    def _resolve_curator_profile(self) -> dict | None:
+        """Resolve the active curator profile for this cycle.
+
+        Default-passthrough: the profile supplies the default for every knob,
+        and an operator-set env var for a knob wins only when explicitly set
+        (see apply_env_overrides). Returns the resolved profile dict (or None
+        when no curator is wired) and stores the cycle's sizing knobs.
+        """
+        if not self.curator:
+            self._position_size_multiplier = 1.0
+            self._confidence_floor_bps = None
+            self._enabled_signals = None
+            return None
+
+        profile = self.curator.active_profile()
+        resolved = apply_env_overrides(
+            profile,
+            {
+                "position_size_multiplier": os.getenv("CURATOR_POSITION_SIZE_MULTIPLIER"),
+                "confidence_floor_bps": os.getenv("CURATOR_CONFIDENCE_FLOOR_BPS"),
+                "max_leverage": os.getenv("CURATOR_MAX_LEVERAGE"),
+            },
+            casters={
+                "position_size_multiplier": float,
+                "confidence_floor_bps": int,
+                "max_leverage": float,
+            },
+        )
+        self._position_size_multiplier = float(resolved.get("position_size_multiplier", 1.0))
+        self._confidence_floor_bps = resolved.get("confidence_floor_bps")
+        enabled = resolved.get("enabled_signals")
+        self._enabled_signals = set(enabled) if enabled else None
+        return resolved
+
+    def _check_integrity(self, asset: str, market_data: dict,
+                         ledger: dict | None = None) -> IntegrityResult | None:
+        """Run the pre-signal integrity gate for an asset.
+
+        Returns None when no gate is wired. A HARD_BLOCK result means the
+        asset is skipped before a single signal is generated on top of
+        questionable inputs. The ledger-consistency check only runs when real
+        book figures are supplied (`ledger={"cash":..., "positions_value":...}`
+        plus self.expected_equity) — fabricating zeros would defeat the whole
+        point of the check.
+        """
+        if not self.integrity_gate:
+            return None
+
+        now_s = time.time()
+        tick = MarketTick(
+            timestamp=float(market_data.get("timestamp", now_s)),
+            funding_rate=float(market_data.get("funding_rate", 0.0)),
+        )
+        results = [
+            self.integrity_gate.check_market_data({asset: tick}, now_s=now_s),
+        ]
+        if ledger and self.expected_equity is not None:
+            results.append(
+                self.integrity_gate.check_ledger_consistency(
+                    cash=float(ledger.get("cash", 0.0)),
+                    positions_value=float(ledger.get("positions_value", 0.0)),
+                    expected_equity=self.expected_equity,
+                )
+            )
+        return self.integrity_gate.combine(*results)
+
     def _generate_signals(self, asset: str, market_data: dict) -> list[Signal]:
         """Generate signals from all enabled strategies.
 
@@ -204,6 +294,11 @@ class AutonomousTradingAgent:
                 momentum_signal(asset, price_data, short_window=5, long_window=20)
             )
 
+        # Curator profile's enabled-signal allowlist: strategies not in the
+        # active profile are dropped before they reach the ensemble.
+        if self._enabled_signals is not None:
+            signals = [s for s in signals if s.strategy in self._enabled_signals]
+
         return signals
 
     def _compute_order_size(self, signal: Signal) -> float:
@@ -229,11 +324,14 @@ class AutonomousTradingAgent:
         if not (0.0 <= p <= 1.0):
             p = 0.0
         if self.sizing_mode == "linear":
-            return self.max_position_usd * p
-        edge = 2.0 * p - 1.0
-        if edge <= 0.0:
-            return 0.0
-        return self.max_position_usd * edge * self.kelly_fraction
+            base = self.max_position_usd * p
+        else:
+            edge = 2.0 * p - 1.0
+            if edge <= 0.0:
+                return 0.0
+            base = self.max_position_usd * edge * self.kelly_fraction
+        # Curator profile position-size multiplier (default 1.0 = unchanged).
+        return base * self._position_size_multiplier
 
     def _signal_to_order(
         self, signal: Signal, market_data: dict
@@ -294,6 +392,16 @@ class AutonomousTradingAgent:
             timestamp=time.time(),
         )
 
+        # Resolve the curator profile for this cycle ONCE, before any market
+        # data is fetched — its knobs (sizing multiplier, confidence floor,
+        # enabled signals) are stable for the whole cycle.
+        resolved_profile = self._resolve_curator_profile()
+        if resolved_profile:
+            result.curator = {
+                "profile": self.curator.state.current_profile,
+                "knobs": resolved_profile,
+            }
+
         logger.info(f"Starting trading cycle {cycle_id} for {len(assets)} assets")
 
         # --- Phase 1: Market Data ---
@@ -307,6 +415,23 @@ class AutonomousTradingAgent:
                 continue
 
             asset = md["asset"]
+
+            # --- Phase 1.5: Pre-Signal Integrity Gate ---
+            # Runs BEFORE signal generation: a stale/NaN feed or an
+            # unreconciled ledger blocks this asset before any signal is
+            # ever built on it, and the block is written to the audit log.
+            integrity = self._check_integrity(asset, md)
+            if integrity and integrity.blocks_trading:
+                msg = f"Integrity gate blocked {asset}: {integrity.reasons}"
+                result.errors.append(msg)
+                logger.warning(f"Integrity gate blocked: {msg}")
+                if self.audit_log:
+                    self.audit_log.write("integrity_block", {
+                        "cycle_id": cycle_id,
+                        "asset": asset,
+                        "reasons": integrity.reasons,
+                    })
+                continue
 
             # --- Phase 2: Signal Generation ---
             signals = self._generate_signals(asset, md)
@@ -323,6 +448,22 @@ class AutonomousTradingAgent:
                 f"(conf: {ensemble.confidence_bps/100:.0f}%, "
                 f"strategy: {ensemble.rationale[:80]}...)"
             )
+
+            # Curator confidence floor: a profile (or CURATOR_CONFIDENCE_FLOOR_BPS
+            # env override) that demands more conviction than the ensemble
+            # produced skips the asset before the risk gate sees it.
+            if self._confidence_floor_bps is not None and ensemble.confidence_bps < self._confidence_floor_bps:
+                msg = (f"Curator confidence floor {self._confidence_floor_bps}bps not met for "
+                       f"{asset} ({ensemble.confidence_bps}bps)")
+                logger.info(msg)
+                if self.audit_log:
+                    self.audit_log.write("curator_confidence_floor", {
+                        "cycle_id": cycle_id,
+                        "asset": asset,
+                        "confidence_bps": ensemble.confidence_bps,
+                        "floor_bps": self._confidence_floor_bps,
+                    })
+                continue
 
             # --- Phase 3: Risk Gate ---
             order = self._signal_to_order(ensemble, md)
@@ -352,6 +493,14 @@ class AutonomousTradingAgent:
                     f"Risk gate rejected {asset}: {risk_result.reason}"
                 )
                 logger.warning(f"Risk gate rejected: {risk_result.code}: {risk_result.reason}")
+                if self.audit_log:
+                    self.audit_log.write("risk_rejection", {
+                        "cycle_id": cycle_id,
+                        "asset": asset,
+                        "code": risk_result.code,
+                        "reason": risk_result.reason,
+                        "confidence_bps": ensemble.confidence_bps,
+                    })
                 continue
 
             # --- Phase 4: Onchain Decision Log ---
