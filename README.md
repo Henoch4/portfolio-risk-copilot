@@ -157,18 +157,3 @@ curl -X POST http://localhost:8000/hire \
 - **Tightening only**: Risk params can only become stricter
 - **No relayer bypass**: `onlyAgent` modifier prevents third-party calls
 
-## Hackathon Alignment
-
-| Requirement | Status |
-|---|---|
-| Incorporate AI elements | Multi-strategy signal engine with ensemble voting |
-| Deploy on X Layer | Solidity contract + Python backend on X Layer |
-| Active X account | [@AuditTrailTrader](https://twitter.com/AuditTrailTrader) |
-| Tag @XLayerOfficial | On submission post |
-| Google Form by Aug 21 | [Link](https://docs.google.com/forms/d/e/1FAIpQLSfgU_3zcXdxK0GJQxj33QeUWdEcAaYnieVe9p5cFDb2JFQa4Q/viewform) |
-
-## Prize Track Opportunities
-
-1. **AI-RWA track** (50K Liquidity Grant) — Can tokenize risk-adjusted yield strategies
-2. **Launch Grant** (up to 200K) — Trading volume via OKX DEX interface
-3. **Hackathon Grant** (30K 1st place) — Product completeness + innovation
