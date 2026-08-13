@@ -79,6 +79,8 @@ class AutonomousTradingAgent:
         max_position_usd: float = 5000,
         agent_id: str = "autonomous-trader-001",
         enable_momentum: bool = False,
+        sizing_mode: str = "kelly",
+        kelly_fraction: float = 0.5,
     ):
         self.cli = okx_cli
         self.risk_gate = risk_gate
@@ -86,6 +88,8 @@ class AutonomousTradingAgent:
         self.dry_run = dry_run
         self.max_position_usd = max_position_usd
         self.agent_id = agent_id
+        self.sizing_mode = sizing_mode
+        self.kelly_fraction = kelly_fraction
         # Off by default — see _generate_signals docstring. Momentum is a
         # phase-2+ strategy per the design doc's Section 0 MVP scope.
         self.enable_momentum = enable_momentum
@@ -196,6 +200,35 @@ class AutonomousTradingAgent:
 
         return signals
 
+    def _compute_order_size(self, signal: Signal) -> float:
+        """Compute order size in USD from confidence using fractional Kelly.
+
+        Kelly criterion for even-money (b=1) bets: f* = 2p - 1, the share of
+        the bankroll that maximizes long-run geometric growth. We scale the
+        full-Kelly stake by `kelly_fraction` (default 0.5 = half-Kelly), the
+        standard conservative choice: half-Kelly gives ~75% of full-Kelly's
+        growth at ~25% of its drawdown variance, per the original 1956 Kelly
+        sizing literature.
+
+            f = (2p - 1) * kelly_fraction      where p = signal.probability
+            size_usd = max_position_usd * f
+
+        This replaces the older linear sizing (size = max * p), which
+        overbet weak signals: a 55% signal spent 55% of max. Under half-Kelly
+        the same signal spends (2*0.55 - 1)*0.5 = 5% of max. Signals below
+        50% confidence produce a negative edge and size 0 (no trade), which
+        is exactly the desired filter.
+        """
+        p = signal.confidence_bps / 10000.0
+        if not (0.0 <= p <= 1.0):
+            p = 0.0
+        if self.sizing_mode == "linear":
+            return self.max_position_usd * p
+        edge = 2.0 * p - 1.0
+        if edge <= 0.0:
+            return 0.0
+        return self.max_position_usd * edge * self.kelly_fraction
+
     def _signal_to_order(
         self, signal: Signal, market_data: dict
     ) -> OrderRequest | None:
@@ -207,9 +240,14 @@ class AutonomousTradingAgent:
         current_size = float(position.get("pos", 0)) if position else 0
         current_side = position.get("side") if position else None
 
-        # Determine order size based on confidence and max position
-        confidence_factor = signal.confidence_bps / 10000.0
-        order_size = self.max_position_usd * confidence_factor
+        # Determine order size from confidence via fractional Kelly sizing
+        order_size = self._compute_order_size(signal)
+        if order_size <= 0.0:
+            logger.info(
+                f"No order for {signal.asset}: {signal.direction} "
+                f"(conf {signal.confidence_bps}/10000 has no positive Kelly edge)"
+            )
+            return None
 
         # If we have a position in the same direction, consider it a hold
         if current_side and abs(current_size) > 0:
@@ -287,6 +325,12 @@ class AutonomousTradingAgent:
 
             asset_prices = self._extract_prices(md)
             current_price = asset_prices[-1] if asset_prices else None
+
+            # Feed the regime-throttle gate: observed prices let the gate's
+            # volatility governor decide whether to scale down the position cap.
+            if current_price is not None:
+                self.risk_gate.observe_price(asset, current_price)
+
             current_position_side = (md.get("position") or {}).get("side")
 
             risk_result = self.risk_gate.check_order(

@@ -185,6 +185,114 @@ class TestRiskGate:
         assert stats["volume"] == 1500.0
 
 
+class TestRegimeThrottle:
+
+    def test_regime_throttle_disabled_returns_full_scale(self):
+        gate = RiskGate(max_position_usd=5000, regime_throttle=False)
+        # Even a wild price range must not throttle when disabled.
+        for p in [100, 500, 50, 900]:
+            gate.observe_price("BTC-USDT-SWAP", p)
+        assert gate.regime_scale("BTC-USDT-SWAP") == 1.0
+
+    def test_regime_no_scale_with_no_observations(self):
+        gate = RiskGate(max_position_usd=5000, regime_throttle=True)
+        assert gate.regime_scale("BTC-USDT-SWAP") == 1.0
+
+    def test_regime_calm_market_full_scale(self):
+        gate = RiskGate(
+            max_position_usd=5000, regime_throttle=True,
+            regime_band_pct=5.0, regime_size_scale=0.8,
+        )
+        for p in [100, 101, 99, 100, 100]:
+            gate.observe_price("BTC-USDT-SWAP", p)
+        assert gate.regime_scale("BTC-USDT-SWAP") == 1.0
+
+    def test_regime_volatile_market_scales_down(self):
+        gate = RiskGate(
+            max_position_usd=5000, regime_throttle=True,
+            regime_band_pct=5.0, regime_size_scale=0.8,
+        )
+        # 100 -> 150 is a 50% range vs mean ~125 => well past the 5% band.
+        for p in [100, 100, 100, 150, 150, 150]:
+            gate.observe_price("BTC-USDT-SWAP", p)
+        assert gate.regime_scale("BTC-USDT-SWAP") == 0.8
+
+    def test_regime_scale_is_floor_not_negative(self):
+        gate = RiskGate(
+            max_position_usd=5000, regime_throttle=True,
+            regime_band_pct=5.0, regime_size_scale=0.5,
+        )
+        # Extreme spread should clamp at regime_size_scale, never below.
+        for p in [100, 1000, 50, 2000, 30]:
+            gate.observe_price("BTC-USDT-SWAP", p)
+        assert gate.regime_scale("BTC-USDT-SWAP") == 0.5
+
+    def test_regime_size_cap_rejects_oversized_order(self):
+        gate = RiskGate(
+            max_position_usd=5000, regime_throttle=True,
+            regime_band_pct=5.0, regime_size_scale=0.8,
+        )
+        for p in [100, 100, 100, 150, 150, 150]:
+            gate.observe_price("BTC-USDT-SWAP", p)
+        # Calm would allow $4500; throttled cap is 5000*0.8 = $4000.
+        order = OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="buy", order_type="market", size="4500",
+        )
+        result = gate.check_order(order, "agent1")
+        assert result.approved is False
+        assert result.code == "REGIME_SIZE_CAP"
+
+    def test_regime_size_under_cap_approved(self):
+        gate = RiskGate(
+            max_position_usd=5000, regime_throttle=True,
+            regime_band_pct=5.0, regime_size_scale=0.8,
+        )
+        for p in [100, 100, 100, 150, 150, 150]:
+            gate.observe_price("BTC-USDT-SWAP", p)
+        order = OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="buy", order_type="market", size="3000",
+        )
+        result = gate.check_order(order, "agent1")
+        assert result.approved is True
+
+    def test_regime_size_cap_distinct_from_position_too_large(self):
+        gate = RiskGate(max_position_usd=5000, regime_throttle=True,
+                        regime_band_pct=5.0, regime_size_scale=0.8)
+        for p in [100, 100, 100, 150, 150, 150]:
+            gate.observe_price("BTC-USDT-SWAP", p)
+        # Make sure an over-cap order in a throttled regime reports the
+        # regime code, not the generic POSITION_TOO_LARGE code.
+        order = OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="buy", order_type="market", size="9999",
+        )
+        result = gate.check_order(order, "agent1")
+        assert result.code == "REGIME_SIZE_CAP"
+
+    def test_regime_price_buffer_reset(self):
+        gate = RiskGate(max_position_usd=5000, regime_throttle=True,
+                        regime_band_pct=5.0, regime_size_scale=0.8)
+        for p in [100, 100, 150, 150]:
+            gate.observe_price("BTC-USDT-SWAP", p)
+        gate.reset_price_buffer("BTC-USDT-SWAP")
+        assert gate.regime_scale("BTC-USDT-SWAP") == 1.0
+
+    def test_regime_risk_hash_includes_throttle(self):
+        g1 = RiskGate(regime_throttle=False)
+        g2 = RiskGate(regime_throttle=True)
+        assert g1.compute_risk_hash() != g2.compute_risk_hash()
+
+    def test_regime_market_order_calm_approved(self):
+        gate = RiskGate(max_position_usd=5000, regime_throttle=True,
+                        regime_band_pct=5.0, regime_size_scale=0.8)
+        for p in [100, 101, 100, 99, 100]:
+            gate.observe_price("BTC-USDT-SWAP", p)
+        order = OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="buy", order_type="market", size="1000",
+        )
+        result = gate.check_order(order, "agent1")
+        assert result.approved is True
+
+
 class TestOrderRequest:
 
     def test_client_oid_auto_generated(self):

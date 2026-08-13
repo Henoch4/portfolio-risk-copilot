@@ -259,6 +259,19 @@ class RiskGate:
         max_slippage_pct: float = 1.0,
         min_confidence_bps: int = 7000,
         allowed_assets: list[str] | None = None,
+        # --- Regime throttle (high-volatility governor) ---
+        # Borrowed from trading engines that auto-scale exposure ahead of a
+        # crash instead of waiting for the kill switch. When recent price
+        # moves exceed `regime_band_pct`, the effective position cap for new
+        # orders is scaled down by `regime_size_scale` (e.g. 0.8 = 20% less
+        # room). This is a *sizing* control, not a halt: it shrinks the next
+        # order without stopping the strategy, and the kill switch remains the
+        # only full-halt control. Deterministic and testable — no ML, no state
+        # beyond the ring buffer below.
+        regime_throttle: bool = False,
+        regime_band_pct: float = 5.0,
+        regime_size_scale: float = 0.8,
+        regime_buffer: int = 20,
     ):
         self.max_position_usd = max_position_usd
         self.max_daily_loss_usd = max_daily_loss_usd
@@ -272,6 +285,10 @@ class RiskGate:
             "SOL-USDT-SWAP",
             "BNB-USDT-SWAP",
         ]
+        self.regime_throttle = regime_throttle
+        self.regime_band_pct = regime_band_pct
+        self.regime_size_scale = regime_size_scale
+        self.regime_buffer = regime_buffer
         
         # Daily tracking (in production, this would be persisted in Redis/DB)
         self._daily_volume: dict[str, float] = {}
@@ -285,6 +302,12 @@ class RiskGate:
         self._kill_switch_active: bool = False
         self._kill_switch_reason: str | None = None
         self._kill_switch_activated_at: float | None = None
+
+        # --- Regime throttle state: per-asset ring buffer of recent prices ---
+        # Registers every market price we observe so the gate can detect a
+        # volatility regime change without needing any external feed. Fed by
+        # RiskGate.observe_price() from the trading loop.
+        self._price_buffer: dict[str, list[float]] = {}  # inst_id -> [prices]
 
     def activate_kill_switch(self, reason: str) -> None:
         """Halt all order approval immediately. Requires explicit deactivation to resume."""
@@ -305,6 +328,61 @@ class RiskGate:
             "reason": self._kill_switch_reason,
             "activated_at": self._kill_switch_activated_at,
         }
+
+    def observe_price(self, inst_id: str, price: float) -> None:
+        """Feed a market price into the regime-throttle ring buffer.
+
+        Call this once per observed tick per asset (e.g. at the top of each
+        trading cycle from the market-data step). Prices are kept in a bounded
+        ring buffer (regime_buffer) so old regimes decay naturally.
+        """
+        buf = self._price_buffer.setdefault(inst_id, [])
+        buf.append(price)
+        if len(buf) > self.regime_buffer:
+            buf.pop(0)
+
+    def reset_price_buffer(self, inst_id: str | None = None) -> None:
+        """Clear the regime ring buffer (e.g. after a regime-model change)."""
+        if inst_id is None:
+            self._price_buffer.clear()
+        else:
+            self._price_buffer.pop(inst_id, None)
+
+    def regime_scale(self, inst_id: str) -> float:
+        """Return the position-cap multiplier for the current regime.
+
+        1.0 in a calm regime; regime_size_scale when the observed price range
+        over the window exceeds regime_band_pct. A step function, not a taper:
+        the risk layer is deliberately boring and binary — either the regime
+        is calm (full size) or it is stressed (fixed smaller size) — so the
+        scaling is trivial to reason about and audit.
+
+        Only active when regime_throttle is enabled; otherwise always 1.0.
+        """
+        if not self.regime_throttle:
+            return 1.0
+        buf = self._price_buffer.get(inst_id)
+        if not buf:
+            return 1.0
+        mean = sum(buf) / len(buf)
+        if mean <= 0:
+            return 1.0
+        spread = (max(buf) - min(buf)) / mean * 100.0
+        if spread <= self.regime_band_pct:
+            return 1.0
+        return self.regime_size_scale
+
+    def regime_status(self, inst_id: str | None = None) -> dict:
+        """Report the current regime state for dashboards/tests."""
+        if inst_id is not None:
+            return {
+                "enabled": self.regime_throttle,
+                "band_pct": self.regime_band_pct,
+                "scale": self.regime_scale(inst_id),
+                "window_size": len(self._price_buffer.get(inst_id, [])),
+                "window_capacity": self.regime_buffer,
+            }
+        return {"enabled": self.regime_throttle, "band_pct": self.regime_band_pct}
 
     def check_order(
         self,
@@ -339,13 +417,25 @@ class RiskGate:
                 reason=f"{order.inst_id} not in allowlist: {self.allowed_assets}",
             )
 
-        # 2. Position size limit
+        # 2. Position size limit (scaled by regime throttle when active)
         try:
             size_usd = float(order.size)
         except (ValueError, TypeError):
             size_usd = 0
 
-        if size_usd > self.max_position_usd:
+        effective_max = self.max_position_usd * self.regime_scale(order.inst_id)
+        if size_usd > effective_max:
+            if effective_max < self.max_position_usd:
+                return RiskCheckResult(
+                    approved=False,
+                    code="REGIME_SIZE_CAP",
+                    reason=(
+                        f"Position ${size_usd:.2f} exceeds regime-scaled cap "
+                        f"${effective_max:.2f} (max ${self.max_position_usd:.2f} "
+                        f"x regime scale {self.regime_scale(order.inst_id):.2f}). "
+                        f"High-volatility regime — throttle is active."
+                    ),
+                )
             return RiskCheckResult(
                 approved=False,
                 code="POSITION_TOO_LARGE",
@@ -489,6 +579,9 @@ class RiskGate:
             "max_slippage_pct": self.max_slippage_pct,
             "min_confidence_bps": self.min_confidence_bps,
             "allowed_assets": sorted(self.allowed_assets),
+            "regime_throttle": self.regime_throttle,
+            "regime_band_pct": self.regime_band_pct,
+            "regime_size_scale": self.regime_size_scale,
         }
         serialized = json.dumps(params, sort_keys=True)
         return hashlib.sha256(serialized.encode()).hexdigest()

@@ -213,6 +213,9 @@ def _make_risk_gate() -> RiskGate:
         max_leverage=float(os.getenv("MAX_LEVERAGE", "5.0")),
         min_confidence_bps=int(os.getenv("MIN_CONFIDENCE_BPS", "7000")),
         allowed_assets=_ALLOWED_ASSETS,
+        regime_throttle=os.getenv("REGIME_THROTTLE", "false").lower() in ("1", "true", "yes"),
+        regime_band_pct=float(os.getenv("REGIME_BAND_PCT", "5.0")),
+        regime_size_scale=float(os.getenv("REGIME_SIZE_SCALE", "0.8")),
     )
 
 def _make_onchain_logger() -> OnchainLogger | None:
@@ -240,6 +243,8 @@ _trading_agent = AutonomousTradingAgent(
     dry_run=_dry_run,
     max_position_usd=float(os.getenv("MAX_POSITION_USD", "5000")),
     agent_id=os.getenv("AGENT_ID", "autonomous-trader-001"),
+    sizing_mode=os.getenv("SIZING_MODE", "kelly"),
+    kelly_fraction=float(os.getenv("KELLY_FRACTION", "0.5")),
 )
 
 
