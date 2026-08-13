@@ -15,7 +15,7 @@ from collections import defaultdict
 from dataclasses import asdict
 from typing import Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -45,6 +45,7 @@ from .okx_cli import OkxCli, OkxCliConfig, OkxCliError
 from .execution import RiskGate
 from .agent import AutonomousTradingAgent
 from .audit_logger import OnchainLogger
+from .validation import validation_report
 from .audit_trail import AuditLog
 from .curator import CuratorAgent
 from .data_integrity import DataIntegrityGate
@@ -56,6 +57,35 @@ ALLOW_LIVE = os.getenv("ALLOW_LIVE", "false").lower() == "true"
 _MANIFEST_PATH = pathlib.Path(__file__).resolve().parent.parent / "manifest.json"
 
 app = FastAPI(title="Portfolio Risk Copilot", version="0.1.0")
+
+
+class _CycleWebSocketHub:
+    """Fan-out hub for live cycle results. Best-effort: a slow/disconnected
+    client never blocks the HTTP /trade path that broadcasts to it."""
+
+    def __init__(self) -> None:
+        self._connections: set[WebSocket] = set()
+
+    async def connect(self, ws: WebSocket) -> None:
+        await ws.accept()
+        self._connections.add(ws)
+
+    def disconnect(self, ws: WebSocket) -> None:
+        self._connections.discard(ws)
+
+    async def broadcast(self, payload: dict) -> None:
+        # Snapshot so a disconnect mid-iteration can't mutate our loop.
+        stale: list[WebSocket] = []
+        for ws in list(self._connections):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                stale.append(ws)
+        for ws in stale:
+            self.disconnect(ws)
+
+
+_ws_hub = _CycleWebSocketHub()
 
 # --- Rate limiting ---
 _rate_limit_store: dict[str, list[float]] = defaultdict(list)
@@ -321,7 +351,7 @@ async def trade(req: TradeRequest, _auth: None = Depends(_require_agent_token)):
 
     try:
         result = await _trading_agent.run_trading_cycle(req.assets)
-        return {
+        response = {
             "cycle_id": result.cycle_id,
             "timestamp": result.timestamp,
             "signals": [
@@ -341,6 +371,13 @@ async def trade(req: TradeRequest, _auth: None = Depends(_require_agent_token)):
             "errors": result.errors,
             "dry_run": _dry_run,
         }
+        # Push the completed cycle to any live dashboard clients. Best-effort:
+        # a broadcast failure must not fail the HTTP response.
+        try:
+            await _ws_hub.broadcast(response)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"WebSocket broadcast failed: {e}")
+        return response
     except Exception as e:
         raise HTTPException(500, f"Trading cycle failed: {e}")
 
@@ -373,21 +410,40 @@ async def risk_stats():
         "max_leverage": _risk_gate.max_leverage,
         "min_confidence_bps": _risk_gate.min_confidence_bps,
         "kill_switch": _risk_gate.kill_switch_status(),
+        "dry_run": _dry_run,
     }
 
 
 @app.get("/api/v1/validation")
 async def validation_status():
     """Read-only: the strategy-validation pipeline gate (walk-forward + PBO +
-    Calmar). `last_report` stays null until production wiring persists a
-    validation_report() — an honest null beats a fabricated backtest."""
+    Calmar). When VALIDATION_RETURNS_PATH points at a CSV of historical returns
+    (columns: in_sample, out_of_sample), the real validation_report() is run and
+    its cleared_for_paper_trading boolean is returned. Without data, the gate
+    reports an honest null — an unvalidated strategy is not the same as a failed
+    one, so it does not block the demo. CI blocks the deploy only when the gate
+    is configured AND clears=False (see scripts/check_validation_gate.py)."""
+    report = None
+    gate_configured = False
+    path = os.getenv("VALIDATION_RETURNS_PATH", "").strip()
+    if path and os.path.exists(path):
+        try:
+            import numpy as np
+            data = np.loadtxt(path, delimiter=",", skiprows=1)
+            in_sample = data[:, 0]
+            oos = data[:, 1] if data.shape[1] > 1 else data[:, 0]
+            report = validation_report(in_sample, oos)
+            gate_configured = True
+        except Exception as e:
+            logger.warning(f"Validation gate data load failed: {e}")
     return {
         "pipeline": "validation_report (walk-forward + PBO + Calmar bar)",
         "wired": True,
+        "gate_configured": gate_configured,
         "calmar_bar": 1.0,
         "pbo_max": 0.5,
-        "last_report": None,
-        "cleared_for_paper_trading": None,
+        "last_report": report,
+        "cleared_for_paper_trading": report["cleared_for_paper_trading"] if report else None,
         "dry_run": _dry_run,
     }
 
@@ -422,6 +478,22 @@ async def kill_switch_status():
         except Exception as e:
             status["onchain_check_error"] = str(e)
     return status
+
+
+@app.websocket("/ws/cycles")
+async def ws_cycles(websocket: WebSocket):
+    """Live cycle stream. The dashboard connects here to receive each completed
+    cycle's result as soon as POST /trade returns. Connections that error out
+    are dropped silently; the HTTP API remains the source of truth."""
+    await _ws_hub.connect(websocket)
+    try:
+        # Keep the socket open; ignore anything the client sends.
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        _ws_hub.disconnect(websocket)
+    except Exception:
+        _ws_hub.disconnect(websocket)
 
 
 @app.post("/kill-switch/activate")

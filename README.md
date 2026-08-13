@@ -180,7 +180,7 @@ curl -X POST http://localhost:8000/hire \
 
 ## Smart Contract: TradeAuditTrail.sol
 
-**Deployed on**: X Layer Testnet (chainId: 195)
+**Deployed on**: X Layer Testnet (chainId: 1952)
 **Native USDC**: Supported (CCTP-ready, MiCA-compliant)
 
 ### Contract Functions

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,13 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 
 logger = logging.getLogger(__name__)
+
+# Gas safety bounds. estimate_gas is capped so a pathological revert estimate
+# can't blow the tx through the block gas limit; the floor keeps us off a
+# 0-gasPrice tx that no validator would mine.
+_GAS_LIMIT_CAP = 1_500_000
+_GAS_PRICE_GWEI_FLOOR = 1
+_GAS_PRICE_BUFFER = 1.2  # 20% priority buffer over node-reported price
 
 
 @dataclass
@@ -157,7 +165,7 @@ class OnchainLogger:
         rpc_url: str,
         contract_address: str,
         private_key: str,
-        chain_id: int = 195,
+        chain_id: int = 1952,
     ):
         self.w3 = Web(Web.HTTPProvider(rpc_url))
         if not self.w3.is_connected():
@@ -168,23 +176,80 @@ class OnchainLogger:
         self.chain_id = chain_id
         self.agent_address = self.account.address
         self.contract = self.w3.eth.contract(address=self.contract_address, abi=_ABI)
+        # Thread-safe local nonce counter. Seeded lazily from the node on the
+        # first send, then incremented locally so concurrent sends (kill
+        # switch + logDecision racing from different threads) can't grab the
+        # same transaction count and collide.
+        self._nonce_lock = threading.Lock()
+        self._nonce_counter: int | None = None
 
     def is_connected(self) -> bool:
         return self.w3.is_connected()
 
     def get_nonce(self) -> int:
+        """Node-reported transaction count. Kept for scripts/external callers;
+        the transaction path uses _next_nonce() for race safety."""
         return self.w3.eth.get_transaction_count(self.agent_address)
 
-    def _build_tx(self, data: bytes, value: int = 0, gas: int = 300000) -> dict:
-        return {
-            "chainId": self.chain_id,
-            "gas": gas,
-            "gasPrice": self.w3.to_wei("1", "gwei"),
-            "nonce": self.get_nonce(),
-            "data": data,
-            "value": value,
-            "to": self.contract_address,
-        }
+    def _next_nonce(self) -> int:
+        """Return the next nonce to use, maintaining a local monotonic counter
+        so parallel sends don't collide. The counter is seeded from the node on
+        first use and bumped once per send."""
+        if self._nonce_counter is None:
+            self._nonce_counter = self.w3.eth.get_transaction_count(self.agent_address)
+        else:
+            self._nonce_counter += 1
+        return self._nonce_counter
+
+    def _estimate_gas(self, func: object) -> int:
+        """Estimate gas for a contract function call, capped at _GAS_LIMIT_CAP.
+        Falls back to a fixed budget if estimation reverts (e.g. a would-be
+        rejected call) so we still broadcast and learn the real reason on-chain."""
+        try:
+            est = func.estimate_gas({"from": self.agent_address})
+            return min(int(est * 1.25), _GAS_LIMIT_CAP)
+        except Exception as e:
+            logger.warning(f"Gas estimation failed ({e}); using fallback 300000")
+            return 300_000
+
+    def _gas_price(self) -> int:
+        """Use the node-reported gas price with a 20% priority buffer and a 1
+        gwei floor, rather than a hardcoded 1 gwei that X Layer may reject."""
+        try:
+            gp = self.w3.eth.generate_gas_price()
+            if not gp:
+                gp = self.w3.to_wei(_GAS_PRICE_GWEI_FLOOR, "gwei")
+            return max(int(gp * _GAS_PRICE_BUFFER), self.w3.to_wei(_GAS_PRICE_GWEI_FLOOR, "gwei"))
+        except Exception:
+            return self.w3.to_wei(_GAS_PRICE_GWEI_FLOOR, "gwei")
+
+    def _send_transaction(self, build_fn: object, label: str) -> str:
+        """Build, sign, send and await a contract tx with safe gas/nonce.
+
+        All onchain writes go through here so gas estimation, dynamic gas
+        price, and the thread-safe nonce counter are applied uniformly. The
+        nonce is reserved under a lock so concurrent sends serialize their
+        nonces; the receipt wait happens outside the lock. A reverted receipt
+        raises instead of being silently treated as success.
+        """
+        with self._nonce_lock:
+            nonce = self._next_nonce()
+            func = build_fn()
+            gas = self._estimate_gas(func)
+            gas_price = self._gas_price()
+            tx_data = func.build_transaction({
+                "chainId": self.chain_id,
+                "nonce": nonce,
+                "gas": gas,
+                "gasPrice": gas_price,
+            })
+            signed = self.w3.eth.account.sign_transaction(tx_data, self.private_key)
+            tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+        if receipt.get("status") != 1:
+            raise RuntimeError(f"{label} reverted on-chain (tx {tx_hash.hex()})")
+        logger.info(f"{label}. Tx: {tx_hash.hex()}")
+        return tx_hash.hex()
 
     def set_risk_params(
         self,
@@ -207,19 +272,14 @@ class OnchainLogger:
           not 500. Verify with TradeAuditTrail.sol's own leverage check
           (search for EXCEEDS_MAX_LEVERAGE) before changing this default.
         """
-        tx_data = self.contract.functions.setRiskParams(
-            int(max_position_usd * 1e8),
-            int(max_daily_loss_usd * 1e8),
-            max_leverage_bps,
-            min_confidence_bps,
-        ).build_transaction({"chainId": self.chain_id, "nonce": self.get_nonce()})
-
-        # Sign and send
-        signed = self.w3.eth.account.sign_transaction(tx_data, self.private_key)
-        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
-        self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-        logger.info(f"Risk params set. Tx: {tx_hash.hex()}")
-        return tx_hash.hex()
+        def build():
+            return self.contract.functions.setRiskParams(
+                int(max_position_usd * 1e8),
+                int(max_daily_loss_usd * 1e8),
+                max_leverage_bps,
+                min_confidence_bps,
+            )
+        return self._send_transaction(build, "Risk params set")
 
     def _compute_payload_hash(self, payload: DecisionPayload) -> bytes:
         """Compute the keccak256 hash of the decision payload (what the agent signs).
@@ -297,16 +357,9 @@ class OnchainLogger:
             "isShort": payload.is_short,
         }
 
-        tx_data = self.contract.functions.logDecision(decision_input).build_transaction({
-            "chainId": self.chain_id,
-            "nonce": self.get_nonce(),
-        })
-
-        signed = self.w3.eth.account.sign_transaction(tx_data, self.private_key)
-        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
-        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-        logger.info(f"Decision logged. Tx: {tx_hash.hex()}")
-        return tx_hash.hex()
+        def build():
+            return self.contract.functions.logDecision(decision_input)
+        return self._send_transaction(build, "Decision logged")
 
     def record_execution(
         self,
@@ -319,48 +372,29 @@ class OnchainLogger:
         """Record execution result. Must reference a previously logged decision."""
         decision_id_hash = Web.keccak(text=decision_id)
 
-        tx_data = self.contract.functions.recordExecution(
-            decision_id_hash,
-            int(fill_price * 1e8),
-            int(fill_size_usd * 1e8),
-            int(fee_usd * 1e8),
-            success,
-        ).build_transaction({
-            "chainId": self.chain_id,
-            "nonce": self.get_nonce(),
-        })
-
-        signed = self.w3.eth.account.sign_transaction(tx_data, self.private_key)
-        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
-        self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-        logger.info(f"Execution recorded. Tx: {tx_hash.hex()}")
-        return tx_hash.hex()
+        def build():
+            return self.contract.functions.recordExecution(
+                decision_id_hash,
+                int(fill_price * 1e8),
+                int(fill_size_usd * 1e8),
+                int(fee_usd * 1e8),
+                success,
+            )
+        return self._send_transaction(build, "Execution recorded")
 
     def activate_kill_switch(self, reason: str) -> str:
         """Halt all onchain logDecision calls from this agent. Mirrors
         RiskGate.activate_kill_switch — call both so the halt is enforced
         even if only one layer is checked by a given caller."""
-        tx_data = self.contract.functions.activateKillSwitch(reason).build_transaction({
-            "chainId": self.chain_id,
-            "nonce": self.get_nonce(),
-        })
-        signed = self.w3.eth.account.sign_transaction(tx_data, self.private_key)
-        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
-        self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-        logger.warning(f"Onchain kill switch activated: {reason}. Tx: {tx_hash.hex()}")
-        return tx_hash.hex()
+        def build():
+            return self.contract.functions.activateKillSwitch(reason)
+        return self._send_transaction(build, f"Onchain kill switch activated: {reason}")
 
     def deactivate_kill_switch(self) -> str:
         """Resume onchain trading. A deliberate, separate call."""
-        tx_data = self.contract.functions.deactivateKillSwitch().build_transaction({
-            "chainId": self.chain_id,
-            "nonce": self.get_nonce(),
-        })
-        signed = self.w3.eth.account.sign_transaction(tx_data, self.private_key)
-        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
-        self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-        logger.info(f"Onchain kill switch deactivated. Tx: {tx_hash.hex()}")
-        return tx_hash.hex()
+        def build():
+            return self.contract.functions.deactivateKillSwitch()
+        return self._send_transaction(build, "Onchain kill switch deactivated")
 
     def is_kill_switch_active(self) -> bool:
         return bool(self.contract.functions.killSwitchActive(self.agent_address).call())

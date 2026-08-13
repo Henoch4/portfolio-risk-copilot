@@ -1,0 +1,22 @@
+name: validation-gate
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validation-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run validation gate
+        # Blocks the deploy only when VALIDATION_RETURNS_PATH is configured and
+        # the strategy fails the Calmar/PBO bar. Unset => honest null (skip).
+        run: python scripts/check_validation_gate.py

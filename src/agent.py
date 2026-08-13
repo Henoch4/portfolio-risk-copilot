@@ -124,6 +124,14 @@ class AutonomousTradingAgent:
             dry_run=dry_run,
         )
 
+        # Concurrency guards for the shared, mutable pieces touched inside the
+        # parallel per-asset pipeline: the risk gate's regime/volume state and
+        # the append-only audit log. Network I/O (onchain writes, OKX fills)
+        # runs in worker threads via asyncio.to_thread and is serialized only
+        # on the nonce lock inside OnchainLogger.
+        self._risk_lock = asyncio.Lock()
+        self._audit_lock = asyncio.Lock()
+
         # Track open positions for this agent
         self._open_positions: dict[str, dict] = {}
         self._daily_pnl: float = 0.0
@@ -404,83 +412,110 @@ class AutonomousTradingAgent:
 
         logger.info(f"Starting trading cycle {cycle_id} for {len(assets)} assets")
 
-        # --- Phase 1: Market Data ---
+        # --- Phase 1: Market Data --- (parallel across assets)
         market_data_tasks = [self._fetch_market_data(asset) for asset in assets]
         market_data_list = await asyncio.gather(*market_data_tasks, return_exceptions=True)
 
+        # --- Phases 1.5-5: per-asset pipeline --- (parallel across assets)
+        # Each asset's full path (integrity -> signal -> risk -> onchain log ->
+        # execute) runs as its own coroutine. Blocking network calls (onchain
+        # writes) run in worker threads via asyncio.to_thread so they overlap;
+        # the shared risk gate and audit log are guarded by locks. Results are
+        # collected per asset and merged back in input order so callers that
+        # depend on ordering (tests, downstream consumers) see a stable shape.
+        tasks = []
+        errored_assets = []
         for i, md in enumerate(market_data_list):
             if isinstance(md, Exception):
                 result.errors.append(f"Market data error for {assets[i]}: {md}")
                 logger.error(f"Market data error: {md}")
+                errored_assets.append(assets[i])
                 continue
+            tasks.append(self._process_asset(md, cycle_id, result))
 
-            asset = md["asset"]
+        per_asset = await asyncio.gather(*tasks, return_exceptions=True)
+        for out in per_asset:
+            if isinstance(out, Exception):
+                result.errors.append(f"Asset processing error: {out}")
+                logger.error(f"Asset processing error: {out}")
+                continue
+            result.signals.extend(out["signals"])
+            result.decisions.extend(out["decisions"])
+            result.executions.extend(out["executions"])
+            result.errors.extend(out["errors"])
 
-            # --- Phase 1.5: Pre-Signal Integrity Gate ---
-            # Runs BEFORE signal generation: a stale/NaN feed or an
-            # unreconciled ledger blocks this asset before any signal is
-            # ever built on it, and the block is written to the audit log.
-            integrity = self._check_integrity(asset, md)
-            if integrity and integrity.blocks_trading:
-                msg = f"Integrity gate blocked {asset}: {integrity.reasons}"
-                result.errors.append(msg)
-                logger.warning(f"Integrity gate blocked: {msg}")
-                if self.audit_log:
+        return result
+
+    async def _process_asset(self, md: dict, cycle_id: str, result: "TradingCycleResult") -> dict:  # noqa: F821
+        """Run the full per-asset pipeline for one market-data snapshot.
+
+        Returns the lists this asset produced (signals/decisions/executions/
+        errors) so the parent cycle can merge them in input order. Shared
+        mutable state (risk gate, audit log) is guarded; blocking network I/O
+        runs in worker threads.
+        """
+        asset = md["asset"]
+        out: dict = {"signals": [], "decisions": [], "executions": [], "errors": []}
+
+        # --- Phase 1.5: Pre-Signal Integrity Gate ---
+        integrity = self._check_integrity(asset, md)
+        if integrity and integrity.blocks_trading:
+            msg = f"Integrity gate blocked {asset}: {integrity.reasons}"
+            out["errors"].append(msg)
+            logger.warning(f"Integrity gate blocked: {msg}")
+            if self.audit_log:
+                async with self._audit_lock:
                     self.audit_log.write("integrity_block", {
                         "cycle_id": cycle_id,
                         "asset": asset,
                         "reasons": integrity.reasons,
                     })
-                continue
+            return out
 
-            # --- Phase 2: Signal Generation ---
-            signals = self._generate_signals(asset, md)
-            ensemble = ensemble_signal(asset, signals)
+        # --- Phase 2: Signal Generation ---
+        signals = self._generate_signals(asset, md)
+        ensemble = ensemble_signal(asset, signals)
 
-            result.signals.append({
-                "asset": asset,
-                "ensemble": ensemble.to_dict(),
-                "individual": [s.to_dict() for s in signals],
-            })
+        out["signals"].append({
+            "asset": asset,
+            "ensemble": ensemble.to_dict(),
+            "individual": [s.to_dict() for s in signals],
+        })
 
-            logger.info(
-                f"Signal for {asset}: {ensemble.direction} "
-                f"(conf: {ensemble.confidence_bps/100:.0f}%, "
-                f"strategy: {ensemble.rationale[:80]}...)"
-            )
+        logger.info(
+            f"Signal for {asset}: {ensemble.direction} "
+            f"(conf: {ensemble.confidence_bps/100:.0f}%, "
+            f"strategy: {ensemble.rationale[:80]}...)"
+        )
 
-            # Curator confidence floor: a profile (or CURATOR_CONFIDENCE_FLOOR_BPS
-            # env override) that demands more conviction than the ensemble
-            # produced skips the asset before the risk gate sees it.
-            if self._confidence_floor_bps is not None and ensemble.confidence_bps < self._confidence_floor_bps:
-                msg = (f"Curator confidence floor {self._confidence_floor_bps}bps not met for "
-                       f"{asset} ({ensemble.confidence_bps}bps)")
-                logger.info(msg)
-                if self.audit_log:
+        # Curator confidence floor
+        if self._confidence_floor_bps is not None and ensemble.confidence_bps < self._confidence_floor_bps:
+            msg = (f"Curator confidence floor {self._confidence_floor_bps}bps not met for "
+                   f"{asset} ({ensemble.confidence_bps}bps)")
+            logger.info(msg)
+            if self.audit_log:
+                async with self._audit_lock:
                     self.audit_log.write("curator_confidence_floor", {
                         "cycle_id": cycle_id,
                         "asset": asset,
                         "confidence_bps": ensemble.confidence_bps,
                         "floor_bps": self._confidence_floor_bps,
                     })
-                continue
+            return out
 
-            # --- Phase 3: Risk Gate ---
-            order = self._signal_to_order(ensemble, md)
-            if order is None:
-                logger.info(f"No order for {asset} (no tradeable signal or already positioned)")
-                continue
+        # --- Phase 3: Risk Gate ---
+        order = self._signal_to_order(ensemble, md)
+        if order is None:
+            logger.info(f"No order for {asset} (no tradeable signal or already positioned)")
+            return out
 
-            asset_prices = self._extract_prices(md)
-            current_price = asset_prices[-1] if asset_prices else None
+        asset_prices = self._extract_prices(md)
+        current_price = asset_prices[-1] if asset_prices else None
 
-            # Feed the regime-throttle gate: observed prices let the gate's
-            # volatility governor decide whether to scale down the position cap.
+        async with self._risk_lock:
             if current_price is not None:
                 self.risk_gate.observe_price(asset, current_price)
-
             current_position_side = (md.get("position") or {}).get("side")
-
             risk_result = self.risk_gate.check_order(
                 order,
                 self.agent_id,
@@ -488,12 +523,11 @@ class AutonomousTradingAgent:
                 current_price_timestamp=md.get("timestamp"),
                 current_position_side=current_position_side,
             )
-            if not risk_result.approved:
-                result.errors.append(
-                    f"Risk gate rejected {asset}: {risk_result.reason}"
-                )
-                logger.warning(f"Risk gate rejected: {risk_result.code}: {risk_result.reason}")
-                if self.audit_log:
+        if not risk_result.approved:
+            out["errors"].append(f"Risk gate rejected {asset}: {risk_result.reason}")
+            logger.warning(f"Risk gate rejected: {risk_result.code}: {risk_result.reason}")
+            if self.audit_log:
+                async with self._audit_lock:
                     self.audit_log.write("risk_rejection", {
                         "cycle_id": cycle_id,
                         "asset": asset,
@@ -501,49 +535,30 @@ class AutonomousTradingAgent:
                         "reason": risk_result.reason,
                         "confidence_bps": ensemble.confidence_bps,
                     })
-                continue
+            return out
 
-            # --- Phase 4: Onchain Decision Log ---
-            decision_payload = DecisionPayload(
-                decision_id=f"dec_{uuid.uuid4().hex[:12]}",
-                agent_address=self.onchain_logger.agent_address if self.onchain_logger else "0x0000000000000000000000000000000000000000",
-                asset=asset,
-                signal=ensemble.direction,
-                strategy=f"{ensemble.strategy}+{ensemble.metadata.get('signals', [{}])[0].get('strategy', 'unknown') if ensemble.metadata.get('signals') else 'unknown'}",
-                confidence_bps=ensemble.confidence_bps,
-                entry_price=ensemble.entry_price or 0,
-                size_usd=float(order.size),
-                risk_params_hash=self.risk_gate.compute_risk_hash() if hasattr(self.risk_gate, 'compute_risk_hash') else "0x" + "00" * 32,
-                timestamp=int(time.time()),
-            )
+        # --- Phase 4: Onchain Decision Log ---
+        decision_payload = DecisionPayload(
+            decision_id=f"dec_{uuid.uuid4().hex[:12]}",
+            agent_address=self.onchain_logger.agent_address if self.onchain_logger else "0x0000000000000000000000000000000000000000",
+            asset=asset,
+            signal=ensemble.direction,
+            strategy=f"{ensemble.strategy}+{ensemble.metadata.get('signals', [{}])[0].get('strategy', 'unknown') if ensemble.metadata.get('signals') else 'unknown'}",
+            confidence_bps=ensemble.confidence_bps,
+            entry_price=ensemble.entry_price or 0,
+            size_usd=float(order.size),
+            risk_params_hash=self.risk_gate.compute_risk_hash() if hasattr(self.risk_gate, 'compute_risk_hash') else "0x" + "00" * 32,
+            timestamp=int(time.time()),
+        )
 
-            log_tx = None
-            if self.onchain_logger and not self.dry_run:
-                try:
-                    log_tx = self.onchain_logger.log_decision(decision_payload)
-                    result.decisions.append({
-                        "decision_id": decision_payload.decision_id,
-                        "asset": asset,
-                        "tx_hash": log_tx,
-                        "signal": ensemble.direction,
-                        "confidence_bps": ensemble.confidence_bps,
-                        "confidence": ensemble.confidence_bps / 10000.0,
-                        "side": order.side,
-                        "size_usd": float(order.size),
-                        "risk_hash": decision_payload.risk_params_hash,
-                        "status": "approved",
-                    })
-                    logger.info(f"Decision logged onchain: {log_tx}")
-                except Exception as e:
-                    result.errors.append(f"Onchain log failed for {asset}: {e}")
-                    logger.error(f"Onchain logging failed: {e}")
-                    # In production: do NOT execute if onchain log fails
-                    continue
-            else:
-                result.decisions.append({
+        log_tx = None
+        if self.onchain_logger and not self.dry_run:
+            try:
+                log_tx = await asyncio.to_thread(self.onchain_logger.log_decision, decision_payload)
+                out["decisions"].append({
                     "decision_id": decision_payload.decision_id,
                     "asset": asset,
-                    "tx_hash": None,
+                    "tx_hash": log_tx,
                     "signal": ensemble.direction,
                     "confidence_bps": ensemble.confidence_bps,
                     "confidence": ensemble.confidence_bps / 10000.0,
@@ -551,72 +566,87 @@ class AutonomousTradingAgent:
                     "size_usd": float(order.size),
                     "risk_hash": decision_payload.risk_params_hash,
                     "status": "approved",
-                    "dry_run": True,
                 })
+                logger.info(f"Decision logged onchain: {log_tx}")
+            except Exception as e:
+                out["errors"].append(f"Onchain log failed for {asset}: {e}")
+                logger.error(f"Onchain logging failed: {e}")
+                # In production: do NOT execute if onchain log fails
+                return out
+        else:
+            out["decisions"].append({
+                "decision_id": decision_payload.decision_id,
+                "asset": asset,
+                "tx_hash": None,
+                "signal": ensemble.direction,
+                "confidence_bps": ensemble.confidence_bps,
+                "confidence": ensemble.confidence_bps / 10000.0,
+                "side": order.side,
+                "size_usd": float(order.size),
+                "risk_hash": decision_payload.risk_params_hash,
+                "status": "approved",
+                "dry_run": True,
+            })
 
-            # --- Phase 5: Execution ---
-            try:
-                order_result = await self.executor.place_order(
-                    order,
-                    current_price=current_price,
-                    current_price_timestamp=md.get("timestamp"),
+        # --- Phase 5: Execution ---
+        try:
+            order_result = await self.executor.place_order(
+                order,
+                current_price=current_price,
+                current_price_timestamp=md.get("timestamp"),
+            )
+            fill_ok = order_result.fill_verified is not False
+            if order_result.state in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED) and fill_ok:
+                execution_status = "success"
+            elif order_result.fill_verified is False:
+                execution_status = "fill_verification_failed"
+            else:
+                execution_status = order_result.state.value
+            out["executions"].append({
+                "decision_id": decision_payload.decision_id,
+                "asset": asset,
+                "order_id": order_result.order_id,
+                "client_oid": order_result.client_oid,
+                "state": order_result.state.value,
+                "fill_px": order_result.fill_px,
+                "fill_price": order_result.fill_px,
+                "slippage_pct": order_result.slippage_pct,
+                "size_usd": float(order.size),
+                "tx_hash": None,
+                "status": execution_status,
+                "fee": order_result.fee,
+                "fee_ccy": order_result.fee_ccy,
+            })
+            logger.info(f"Order placed: {order_result.order_id}, state={order_result.state}")
+
+            if log_tx and self.onchain_logger:
+                await asyncio.to_thread(
+                    self.onchain_logger.record_execution,
+                    decision_id=decision_payload.decision_id,
+                    fill_price=float(order_result.fill_px or 0),
+                    fill_size_usd=float(order.size),
+                    fee_usd=float(order_result.fee or 0),
+                    success=fill_ok,
                 )
-                # A fill that fails post-fill verification (bad slippage) is NOT
-                # a success, even if the exchange reports it filled — see
-                # OrderExecutor._verify_fill.
-                fill_ok = order_result.fill_verified is not False
-                if order_result.state in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED) and fill_ok:
-                    execution_status = "success"
-                elif order_result.fill_verified is False:
-                    execution_status = "fill_verification_failed"
-                else:
-                    execution_status = order_result.state.value
-                result.executions.append({
-                    "decision_id": decision_payload.decision_id,
-                    "asset": asset,
-                    "order_id": order_result.order_id,
-                    "client_oid": order_result.client_oid,
-                    "state": order_result.state.value,
-                    "fill_px": order_result.fill_px,
-                    "fill_price": order_result.fill_px,
-                    "slippage_pct": order_result.slippage_pct,
-                    "size_usd": float(order.size),
-                    "tx_hash": None,
-                    "status": execution_status,
-                    "fee": order_result.fee,
-                    "fee_ccy": order_result.fee_ccy,
-                })
-                logger.info(f"Order placed: {order_result.order_id}, state={order_result.state}")
 
-                # Record execution onchain
-                if log_tx and self.onchain_logger:
-                    fill_price = float(order_result.fill_px or 0)
-                    fee = float(order_result.fee or 0)
-                    self.onchain_logger.record_execution(
-                        decision_id=decision_payload.decision_id,
-                        fill_price=fill_price,
-                        fill_size_usd=float(order.size),
-                        fee_usd=fee,
-                        success=fill_ok,
-                    )
-
-                # Update daily stats (bad fills still count as trades)
-                if order_result.state in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+            if order_result.state in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                async with self._risk_lock:
                     self.risk_gate.report_volume(self.agent_id, float(order.size))
 
-            except ExecutionError as e:
-                result.errors.append(f"Execution failed for {asset}: {e}")
-                logger.error(f"Execution error: {e}")
-                if self.onchain_logger and log_tx:
-                    self.onchain_logger.record_execution(
-                        decision_id=decision_payload.decision_id,
-                        fill_price=0,
-                        fill_size_usd=0,
-                        fee_usd=0,
-                        success=False,
-                    )
+        except ExecutionError as e:
+            out["errors"].append(f"Execution failed for {asset}: {e}")
+            logger.error(f"Execution error: {e}")
+            if self.onchain_logger and log_tx:
+                await asyncio.to_thread(
+                    self.onchain_logger.record_execution,
+                    decision_id=decision_payload.decision_id,
+                    fill_price=0,
+                    fill_size_usd=0,
+                    fee_usd=0,
+                    success=False,
+                )
 
-        return result
+        return out
 
     async def run(self, assets: list[str], interval_seconds: int = 300) -> None:
         """Run continuous trading loop."""

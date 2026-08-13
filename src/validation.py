@@ -52,7 +52,9 @@ def max_drawdown(returns: np.ndarray) -> float:
 def calmar_ratio(returns: np.ndarray, periods_per_year: int = PERIODS_PER_YEAR) -> float:
     mdd = max_drawdown(returns)
     if mdd == 0:
-        return float("inf")
+        # No drawdown: Calmar is undefined/infinite. A finite cap keeps the
+        # report JSON-serializable (inf is not) while still clearing any bar.
+        return 1e9
     return float(cagr(returns, periods_per_year) / abs(mdd))
 
 
