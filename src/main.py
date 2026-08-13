@@ -8,6 +8,7 @@ Run locally (after completing README.md setup):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pathlib
 import time
@@ -24,6 +25,7 @@ from pydantic import BaseModel, Field
 # Guard against import failures so the app boots in dry-run mode without x402 deps.
 try:
     from x402.http import OKXAuthConfig as _OKXAuthConfig
+    OKXAuthConfig = _OKXAuthConfig
     from x402.http import OKXFacilitatorClient, OKXFacilitatorConfig
     from x402.http.middleware.fastapi import PaymentMiddlewareASGI
     from x402.mechanisms.evm.exact.server import ExactEvmScheme
@@ -49,6 +51,8 @@ from .validation import validation_report
 from .audit_trail import AuditLog
 from .curator import CuratorAgent
 from .data_integrity import DataIntegrityGate
+
+logger = logging.getLogger(__name__)
 
 
 # Safety guard: live-account audits are opt-in at the PROCESS level.
@@ -502,7 +506,7 @@ async def activate_kill_switch(req: KillSwitchRequest, _auth: None = Depends(_re
     also activates onchain if the audit logger is configured, so the halt
     holds even if a caller only checks one layer."""
     _risk_gate.activate_kill_switch(req.reason)
-    result = {"status": "activated", "reason": req.reason, "onchain": None}
+    result: dict = {"status": "activated", "reason": req.reason, "onchain": None}
     if _onchain_logger:
         try:
             tx_hash = _onchain_logger.activate_kill_switch(req.reason)
@@ -517,7 +521,7 @@ async def deactivate_kill_switch(_auth: None = Depends(_require_agent_token)):
     """Resume trading. A deliberate, separate call — this is never triggered
     automatically, only the activation is (see RiskGate.report_loss)."""
     _risk_gate.deactivate_kill_switch()
-    result = {"status": "deactivated", "onchain": None}
+    result: dict = {"status": "deactivated", "onchain": None}
     if _onchain_logger:
         try:
             tx_hash = _onchain_logger.deactivate_kill_switch()

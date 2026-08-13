@@ -123,7 +123,7 @@ class OrderExecutor:
             result.fill_verified = None
             return result
         try:
-            fill_px = float(result.fill_px)
+            fill_px = float(result.fill_px) if result.fill_px is not None else 0.0
         except (TypeError, ValueError):
             fill_px = 0.0
         if fill_px <= 0:
@@ -184,7 +184,7 @@ class OrderExecutor:
         if self.dry_run:
             result = OrderResult(
                 order_id=f"dryrun_{uuid.uuid4().hex[:8]}",
-                client_oid=order.client_oid,
+                client_oid=order.client_oid or "",
                 state=OrderStatus.FILLED,
                 acc_fill_sz=order.size,
                 fill_px=order.px or "0",
@@ -206,7 +206,7 @@ class OrderExecutor:
                 "--ordType", "m" if order.order_type == "market" else "l",
                 "--sz", order.size,
                 *[f"--px {order.px}" for _ in [None] if order.px],
-                "--clOrdId", order.client_oid,
+                "--clOrdId", order.client_oid or "",
                 "--reduceOnly" if order.reduce_only else "",
                 use_global_flags=True,
             )
@@ -283,6 +283,7 @@ class OrderExecutor:
             acc_fill_sz=data.get("accFillSz", "0"),
             fill_px=data.get("fillPx"),
             fill_sz=data.get("fillSz"),
+            fill_usd=data.get("fillUsd"),
             fee=data.get("fee", "0"),
             fee_ccy=data.get("feeCcy", "USDT"),
             raw=result,

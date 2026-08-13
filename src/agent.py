@@ -18,7 +18,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
 
 from .signals import (
     Signal,
@@ -372,7 +372,7 @@ class AutonomousTradingAgent:
                 # For now, skip — don't double down
                 return None
 
-        side_map = {"LONG": "buy", "SHORT": "sell"}
+        side_map: dict[str, Literal["buy", "sell"]] = {"LONG": "buy", "SHORT": "sell"}
 
         return OrderRequest(
             inst_id=signal.asset,
@@ -406,7 +406,7 @@ class AutonomousTradingAgent:
         resolved_profile = self._resolve_curator_profile()
         if resolved_profile:
             result.curator = {
-                "profile": self.curator.state.current_profile,
+                "profile": self.curator.state.current_profile if self.curator else None,
                 "knobs": resolved_profile,
             }
 
@@ -426,7 +426,7 @@ class AutonomousTradingAgent:
         tasks = []
         errored_assets = []
         for i, md in enumerate(market_data_list):
-            if isinstance(md, Exception):
+            if isinstance(md, BaseException):
                 result.errors.append(f"Market data error for {assets[i]}: {md}")
                 logger.error(f"Market data error: {md}")
                 errored_assets.append(assets[i])
@@ -435,7 +435,7 @@ class AutonomousTradingAgent:
 
         per_asset = await asyncio.gather(*tasks, return_exceptions=True)
         for out in per_asset:
-            if isinstance(out, Exception):
+            if isinstance(out, BaseException):
                 result.errors.append(f"Asset processing error: {out}")
                 logger.error(f"Asset processing error: {out}")
                 continue

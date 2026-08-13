@@ -129,7 +129,7 @@ def validation_report(returns: np.ndarray, oos_returns: np.ndarray,
                       calmar_bar: float = 1.0) -> dict:
     """Return a full validation report: in/OOS metrics, Calmar bar, PBO, and
     the `cleared_for_paper_trading` boolean gate."""
-    report = {
+    report: dict = {
         "in_sample": {
             "cagr": cagr(returns),
             "sharpe": sharpe_ratio(returns),

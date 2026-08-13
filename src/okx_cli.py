@@ -27,7 +27,7 @@ class OkxCliError(RuntimeError):
     when the binary itself isn't on PATH."""
 
     def __init__(self, args: list, returncode: int, stderr: str):
-        self.args = args
+        self.args = tuple(args)
         self.returncode = returncode
         self.stderr = stderr
         super().__init__(
@@ -170,7 +170,7 @@ class OkxCli:
             raise OkxCliError(list(args), -1, f"failed to launch `okx`: {e}")
 
         if proc.returncode != 0:
-            raise OkxCliError(list(args), proc.returncode, err.decode())
+            raise OkxCliError(list(args), proc.returncode or 0, err.decode())
 
         text = out.decode().strip()
         if not text:
