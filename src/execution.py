@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
@@ -46,6 +47,7 @@ class OrderRequest:
     time_in_force: TimeInForce = "gtc"
     client_oid: str | None = None  # custom order ID for tracking
     reduce_only: bool = False
+    confidence_bps: int | None = None  # signal confidence in basis points (0-10000)
 
     def __post_init__(self):
         if not self.client_oid:
@@ -78,6 +80,8 @@ class OrderResult:
     fee: str               # fee charged
     fee_ccy: str           # fee currency
     error: str | None = None
+    fill_verified: bool | None = None  # post-fill slippage check: None=not checked, True=ok, False=bad fill
+    slippage_pct: float | None = None  # measured post-fill slippage vs reference price
     raw: dict = field(default_factory=dict)
 
 
@@ -100,13 +104,77 @@ class OrderExecutor:
         self.risk_gate = risk_gate
         self.dry_run = dry_run
 
-    async def place_order(self, order: OrderRequest) -> OrderResult:
+    def _verify_fill(self, order: OrderRequest, result: OrderResult,
+                     reference_price: float | None) -> OrderResult:
+        """Post-fill slippage verification (liquid-protocol-v1 checkPriceImpact port).
+
+        The pre-trade gate checks the *intended* price; this checks the *actual*
+        fill against the same reference price. Behavior on deviation from the
+        reference price used at pre-trade time:
+
+          <= max_slippage_pct          -> fill_verified=True (normal)
+          > max_slippage_pct <= 2x     -> fill_verified=False, flagged, audit trail
+          > 2x (hard collar)           -> fill_verified=False, kill switch tripped
+
+        No reference price or no numeric fill -> fill_verified=None (not checked);
+        a non-checkable fill is never silently marked good.
+        """
+        if reference_price is None or reference_price <= 0:
+            result.fill_verified = None
+            return result
+        try:
+            fill_px = float(result.fill_px)
+        except (TypeError, ValueError):
+            fill_px = 0.0
+        if fill_px <= 0:
+            result.fill_verified = None
+            return result
+
+        slippage_pct = abs(fill_px - reference_price) / reference_price * 100.0
+        result.slippage_pct = round(slippage_pct, 4)
+
+        collar = self.risk_gate.max_slippage_pct
+        hard_collar = collar * 2.0
+        if slippage_pct <= collar:
+            result.fill_verified = True
+        elif slippage_pct <= hard_collar:
+            result.fill_verified = False
+            result.error = (
+                f"Post-fill slippage {slippage_pct:.2f}% vs reference "
+                f"{reference_price} exceeds {collar:.2f}% collar (fill {fill_px}). "
+                f"Order {order.client_oid} filled on poor terms."
+            )
+        else:
+            result.fill_verified = False
+            result.error = (
+                f"Post-fill slippage {slippage_pct:.2f}% vs reference "
+                f"{reference_price} exceeds hard collar {hard_collar:.2f}% "
+                f"(fill {fill_px}). Tripping kill switch — fills are untrustworthy."
+            )
+            self.risk_gate.activate_kill_switch(reason=result.error)
+        return result
+
+    async def place_order(
+        self,
+        order: OrderRequest,
+        current_price: float | None = None,
+        current_price_timestamp: float | None = None,
+    ) -> OrderResult:
         """
         Place an order after passing risk checks.
         In dry-run mode, simulates the order without sending to OKX.
+
+        current_price / current_price_timestamp: the reference market data used
+        at pre-trade time, passed through to the gate's re-check and the
+        post-fill slippage verification below (the Liquid pattern: never print
+        a fill you can't verify against a trusted reference price).
         """
         # --- Step 1: Risk gate check (non-overridable) ---
-        risk_check = self.risk_gate.check_order(order)
+        risk_check = self.risk_gate.check_order(
+            order,
+            current_price=current_price,
+            current_price_timestamp=current_price_timestamp,
+        )
         if not risk_check.approved:
             raise ExecutionError(
                 f"Risk gate rejected order: {risk_check.reason}. "
@@ -114,7 +182,7 @@ class OrderExecutor:
             )
 
         if self.dry_run:
-            return OrderResult(
+            result = OrderResult(
                 order_id=f"dryrun_{uuid.uuid4().hex[:8]}",
                 client_oid=order.client_oid,
                 state=OrderStatus.FILLED,
@@ -127,6 +195,7 @@ class OrderExecutor:
                 error=None,
                 raw={"dry_run": True, **order.to_dict()},
             )
+            return self._verify_fill(order, result, reference_price=current_price)
 
         # --- Step 2: Submit to OKX via CLI ---
         try:
@@ -149,7 +218,7 @@ class OrderExecutor:
 
         order_data = result["data"][0] if isinstance(result.get("data"), list) else result["data"]
 
-        return OrderResult(
+        order_result = OrderResult(
             order_id=order_data.get("ordId", ""),
             client_oid=order_data.get("clOrdId", order.client_oid),
             state=OrderStatus.PENDING,
@@ -161,6 +230,7 @@ class OrderExecutor:
             fee_ccy=order_data.get("feeCcy", "USDT"),
             raw=result,
         )
+        return self._verify_fill(order, order_result, reference_price=current_price)
 
     async def cancel_order(self, order_id: str, inst_id: str) -> bool:
         """Cancel a pending order."""
@@ -259,6 +329,13 @@ class RiskGate:
         max_slippage_pct: float = 1.0,
         min_confidence_bps: int = 7000,
         allowed_assets: list[str] | None = None,
+        # --- Max price age: how old a market price can be before it stops
+        # being trustworthy. Ported from the oracle trust pattern in
+        # liquid-protocol-v1 (oracle.sol): the strategy layer is free to look
+        # ahead, but the gate refuses to trade against a price feed it cannot
+        # trust. A missing OR stale price rejects the order — there is no
+        # "skip the freshness check" path, only a configurable threshold.
+        max_price_age_seconds: float = 60.0,
         # --- Regime throttle (high-volatility governor) ---
         # Borrowed from trading engines that auto-scale exposure ahead of a
         # crash instead of waiting for the kill switch. When recent price
@@ -279,6 +356,7 @@ class RiskGate:
         self.max_leverage = max_leverage
         self.max_slippage_pct = max_slippage_pct
         self.min_confidence_bps = min_confidence_bps
+        self.max_price_age_seconds = max_price_age_seconds
         self.allowed_assets = allowed_assets or [
             "BTC-USDT-SWAP",
             "ETH-USDT-SWAP",
@@ -358,12 +436,19 @@ class RiskGate:
         scaling is trivial to reason about and audit.
 
         Only active when regime_throttle is enabled; otherwise always 1.0.
+
+        Fail-closed on missing data: an empty price buffer means the gate has
+        never observed a trustworthy price for this instrument, so the
+        stressed (`regime_size_scale`) cap applies — defaulting to full size
+        on no data is exactly the fail-open behavior the design doc's
+        fail-safe-defaults principle forbids (uncertainty must reduce risk,
+        not keep it unchanged).
         """
         if not self.regime_throttle:
             return 1.0
         buf = self._price_buffer.get(inst_id)
         if not buf:
-            return 1.0
+            return self.regime_size_scale
         mean = sum(buf) / len(buf)
         if mean <= 0:
             return 1.0
@@ -389,6 +474,7 @@ class RiskGate:
         order: OrderRequest,
         agent_id: str = "default",
         current_price: float | None = None,
+        current_price_timestamp: float | None = None,
         current_position_side: str | None = None,
     ) -> RiskCheckResult:
         """
@@ -396,8 +482,12 @@ class RiskGate:
         Returns approved=True only if ALL checks pass.
 
         current_price: latest market price, used to enforce the slippage/price-collar
-            check on limit orders. Without it, that check is skipped rather than
-            silently passed — see check 6 below.
+            check on limit orders and the price-freshness gate (check 8) on every
+            order. Without it, an order is rejected — never silently passed.
+        current_price_timestamp: epoch seconds when `current_price` was observed.
+            The freshness gate (check 8) rejects any order whose reference price
+            is older than `max_price_age_seconds`; a missing timestamp means the
+            age cannot be verified and is treated as stale (fail-safe-defaults).
         current_position_side: "long" | "short" | None, used to enforce reduce-only
             semantics on sell orders — see check 7 below.
         """
@@ -417,7 +507,21 @@ class RiskGate:
                 reason=f"{order.inst_id} not in allowlist: {self.allowed_assets}",
             )
 
-        # 2. Position size limit (scaled by regime throttle when active)
+        # 2. Confidence floor — the gate enforces it even if the strategy layer
+        # forgets. Skipped only when the caller provides no confidence at all
+        # (the gate cannot second-guess what it was never told).
+        if order.confidence_bps is not None and order.confidence_bps < self.min_confidence_bps:
+            return RiskCheckResult(
+                approved=False,
+                code="CONFIDENCE_TOO_LOW",
+                reason=(
+                    f"Signal confidence {order.confidence_bps} bps below the "
+                    f"{self.min_confidence_bps} bps floor — the risk gate does "
+                    f"not trade on weak signals."
+                ),
+            )
+
+        # 3. Position size limit (scaled by regime throttle when active)
         try:
             size_usd = float(order.size)
         except (ValueError, TypeError):
@@ -445,7 +549,7 @@ class RiskGate:
                 ),
             )
 
-        # 3. Daily trade count
+        # 4. Daily trade count
         if self._daily_trade_count.get(agent_id, 0) >= self.max_daily_trades:
             return RiskCheckResult(
                 approved=False,
@@ -457,7 +561,7 @@ class RiskGate:
                 ),
             )
 
-        # 4. Daily loss limit
+        # 5. Daily loss limit
         current_loss = self._daily_loss.get(agent_id, 0.0)
         if current_loss >= self.max_daily_loss_usd:
             return RiskCheckResult(
@@ -469,7 +573,7 @@ class RiskGate:
                 ),
             )
 
-        # 5. Fat-finger / price sanity check (independent of slippage, always runs)
+        # 6. Fat-finger / price sanity check (independent of slippage, always runs)
         try:
             limit_px = float(order.px) if order.px else None
         except (ValueError, TypeError):
@@ -488,7 +592,7 @@ class RiskGate:
                     ),
                 )
 
-        # 6. Slippage / price collar (for limit orders) — enforced, not stubbed.
+        # 7. Slippage / price collar (for limit orders) — enforced, not stubbed.
         # If we don't have a current market price to compare against, we reject
         # rather than silently approve: an unenforceable check is not a check.
         if order.order_type == "limit" and limit_px is not None:
@@ -513,7 +617,7 @@ class RiskGate:
                     ),
                 )
 
-        # 7. Reduce-only enforcement — enforced, not stubbed.
+        # 8. Reduce-only enforcement — enforced, not stubbed.
         # A sell order that would open or increase a short, rather than reduce
         # an existing long, must be explicitly marked reduce_only=False by the
         # caller and is otherwise rejected here.
@@ -525,6 +629,38 @@ class RiskGate:
                     "Sell order against an existing long position must set "
                     "reduce_only=True — this gate does not allow flipping a "
                     "position from long to short in a single unmarked order."
+                ),
+            )
+
+        # 9. Price-freshness gate — applies to EVERY order type (market, limit),
+        # not just limit orders. Ported from the oracle trust pattern in
+        # liquid-protocol-v1 (oracle.sol): the strategy is free to look ahead,
+        # but the gate refuses to trade against a price feed it cannot trust.
+        # A missing, non-positive, or stale price rejects the order. There is
+        # no "skip the freshness check" path — an unverifiable age is stale.
+        if current_price is None or current_price <= 0:
+            return RiskCheckResult(
+                approved=False,
+                code="NO_PRICE_REFERENCE",
+                reason=(
+                    "Order submitted without a current market price to verify "
+                    "against — cannot check the price collar or freshness."
+                ),
+            )
+        now = time.time()
+        price_age = (
+            now - current_price_timestamp
+            if current_price_timestamp is not None
+            else float("inf")
+        )
+        if price_age > self.max_price_age_seconds:
+            return RiskCheckResult(
+                approved=False,
+                code="STALE_PRICE",
+                reason=(
+                    f"Reference price {current_price} is "
+                    f"{price_age:.1f}s old (cap {self.max_price_age_seconds:.0f}s). "
+                    f"Price feed is not fresh — refusing to trade on stale data."
                 ),
             )
 
@@ -578,6 +714,7 @@ class RiskGate:
             "max_leverage": self.max_leverage,
             "max_slippage_pct": self.max_slippage_pct,
             "min_confidence_bps": self.min_confidence_bps,
+            "max_price_age_seconds": self.max_price_age_seconds,
             "allowed_assets": sorted(self.allowed_assets),
             "regime_throttle": self.regime_throttle,
             "regime_band_pct": self.regime_band_pct,

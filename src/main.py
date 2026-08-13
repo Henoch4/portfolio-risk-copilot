@@ -212,6 +212,7 @@ def _make_risk_gate() -> RiskGate:
         max_daily_trades=int(os.getenv("MAX_DAILY_TRADES", "10")),
         max_leverage=float(os.getenv("MAX_LEVERAGE", "5.0")),
         min_confidence_bps=int(os.getenv("MIN_CONFIDENCE_BPS", "7000")),
+        max_price_age_seconds=float(os.getenv("MAX_PRICE_AGE_SECONDS", "60")),
         allowed_assets=_ALLOWED_ASSETS,
         regime_throttle=os.getenv("REGIME_THROTTLE", "false").lower() in ("1", "true", "yes"),
         regime_band_pct=float(os.getenv("REGIME_BAND_PCT", "5.0")),

@@ -140,15 +140,21 @@ class AutonomousTradingAgent:
         }
 
     def _extract_prices(self, market_data: dict) -> list[float]:
-        """Extract close prices from trade data."""
+        """Extract close prices from trade data.
+
+        Returns [] when there is no real price data — never a fabricated
+        price. The risk gate's freshness check treats an absent price as
+        NO_PRICE_REFERENCE and refuses to trade; a fake 1.0 fallback here
+        would quietly defeat that gate.
+        """
         prices = []
         for trade in market_data.get("trades", []):
             try:
-                prices.append(float(trade.get("px", 0)))
+                px = float(trade.get("px", 0))
+                if px > 0:
+                    prices.append(px)
             except (ValueError, TypeError):
                 continue
-        if not prices:
-            prices = [1.0]  # fallback
         return prices
 
     def _extract_price_data(self, market_data: dict) -> list[dict]:
@@ -269,6 +275,7 @@ class AutonomousTradingAgent:
             size=f"{order_size:.2f}",
             client_oid=f"signal_{signal.strategy}_{uuid.uuid4().hex[:8]}",
             reduce_only=(signal.direction == "SHORT"),  # shorts reduce long positions
+            confidence_bps=signal.confidence_bps,
         )
 
     async def run_trading_cycle(self, assets: list[str]) -> TradingCycleResult:
@@ -337,6 +344,7 @@ class AutonomousTradingAgent:
                 order,
                 self.agent_id,
                 current_price=current_price,
+                current_price_timestamp=md.get("timestamp"),
                 current_position_side=current_position_side,
             )
             if not risk_result.approved:
@@ -399,8 +407,21 @@ class AutonomousTradingAgent:
 
             # --- Phase 5: Execution ---
             try:
-                order_result = await self.executor.place_order(order)
-                execution_status = "success" if order_result.state in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED) else order_result.state.value
+                order_result = await self.executor.place_order(
+                    order,
+                    current_price=current_price,
+                    current_price_timestamp=md.get("timestamp"),
+                )
+                # A fill that fails post-fill verification (bad slippage) is NOT
+                # a success, even if the exchange reports it filled — see
+                # OrderExecutor._verify_fill.
+                fill_ok = order_result.fill_verified is not False
+                if order_result.state in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED) and fill_ok:
+                    execution_status = "success"
+                elif order_result.fill_verified is False:
+                    execution_status = "fill_verification_failed"
+                else:
+                    execution_status = order_result.state.value
                 result.executions.append({
                     "decision_id": decision_payload.decision_id,
                     "asset": asset,
@@ -409,6 +430,7 @@ class AutonomousTradingAgent:
                     "state": order_result.state.value,
                     "fill_px": order_result.fill_px,
                     "fill_price": order_result.fill_px,
+                    "slippage_pct": order_result.slippage_pct,
                     "size_usd": float(order.size),
                     "tx_hash": None,
                     "status": execution_status,
@@ -426,10 +448,10 @@ class AutonomousTradingAgent:
                         fill_price=fill_price,
                         fill_size_usd=float(order.size),
                         fee_usd=fee,
-                        success=True,
+                        success=fill_ok,
                     )
 
-                # Update daily stats
+                # Update daily stats (bad fills still count as trades)
                 if order_result.state in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
                     self.risk_gate.report_volume(self.agent_id, float(order.size))
 
