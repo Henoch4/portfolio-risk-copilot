@@ -15,6 +15,7 @@
       --paper: #EDEAE2;
       --graphite: #8B8D90;
       --seal: #C1121F;
+      --seal-text: #E0555F;   /* readable red for text/badges on dark */
       --seal-dim: rgba(193, 18, 31, 0.14);
       --green: #4CA771;
       --green-dim: rgba(76, 167, 113, 0.14);
@@ -44,120 +45,146 @@
       background: var(--panel);
       border-bottom: 1px solid var(--rule);
       padding: 0.65rem 1.5rem;
-      display: flex; align-items: center; gap: 1.25rem;
-      backdrop-filter: blur(6px);
+      display: flex; flex-wrap: wrap; align-items: center; gap: 1.25rem;
     }
     .strip-mode {
       display: flex; align-items: center; gap: 0.5rem;
-      font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em;
+      font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em;
       color: var(--graphite); white-space: nowrap;
     }
-    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); flex-shrink: 0; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--amber); flex-shrink: 0; }
     .dot.live { background: var(--seal); box-shadow: 0 0 0 3px var(--seal-dim); }
     .dot.halted { background: var(--graphite); }
 
-    .strip-gauge { display: flex; align-items: center; gap: 0.6rem; flex: 1; min-width: 0; }
-    .gauge-label { font-size: 0.72rem; color: var(--graphite); text-transform: uppercase; letter-spacing: 0.06em; white-space: nowrap; }
+    .strip-gauge { display: flex; align-items: center; gap: 0.6rem; flex: 1; min-width: 220px; }
+    .gauge-label { font-size: 0.75rem; color: var(--graphite); text-transform: uppercase; letter-spacing: 0.06em; white-space: nowrap; }
     .gauge-track { flex: 1; max-width: 280px; height: 6px; background: var(--rule); border-radius: 3px; overflow: hidden; }
     .gauge-fill { height: 100%; background: var(--paper); border-radius: 3px; transition: width 0.4s ease, background 0.3s ease; }
     .gauge-fill.warn { background: var(--amber); }
     .gauge-fill.danger { background: var(--seal); }
-    .gauge-value { font-size: 0.78rem; color: var(--paper); white-space: nowrap; }
+    .gauge-value { font-size: 0.8rem; color: var(--paper); white-space: nowrap; }
     .gauge-value .dim { color: var(--graphite); }
 
     .halt-btn {
-      padding: 0.45rem 1rem; border-radius: 7px; border: 1px solid var(--seal);
-      background: transparent; color: var(--seal); font-weight: 700; font-size: 0.72rem;
+      padding: 0.55rem 1rem; min-height: 44px; border-radius: 7px; border: 1px solid var(--seal-text);
+      background: transparent; color: var(--seal-text); font-weight: 700; font-size: 0.75rem;
       text-transform: uppercase; letter-spacing: 0.08em; cursor: pointer; white-space: nowrap;
       transition: all 0.15s;
     }
     .halt-btn:hover { background: var(--seal-dim); }
-    .halt-btn.active { background: var(--seal); color: var(--ink); }
+    .halt-btn.active { background: var(--seal); color: var(--paper); border-color: var(--seal); }
     .halt-btn.active:hover { background: #a30f1a; }
+    .halt-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* Inline kill-switch reason panel (replaces blocking window.prompt) */
+    .halt-panel {
+      flex-basis: 100%; order: 5;
+      display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
+      padding-top: 0.5rem; border-top: 1px solid var(--rule); margin-top: 0.25rem;
+    }
+    .halt-input {
+      flex: 1; min-width: 200px; padding: 0.5rem 0.7rem; background: var(--panel-2);
+      border: 1px solid var(--rule); border-radius: 8px; color: var(--paper); font-size: 0.85rem; font-family: inherit;
+    }
+    .halt-input:focus { border-color: var(--seal-text); outline: none; }
+    .halt-confirm { padding: 0.5rem 1rem; border: 1px solid var(--seal-text); background: var(--seal-text); color: var(--ink); border-radius: 7px; font-weight: 700; font-size: 0.75rem; cursor: pointer; }
+    .halt-cancel { padding: 0.5rem 1rem; border: 1px solid var(--rule); background: transparent; color: var(--graphite); border-radius: 7px; font-size: 0.75rem; cursor: pointer; }
+
+    /* Error toast (placed near the strip, not below the fold) */
+    .toast {
+      position: fixed; top: 64px; left: 50%; transform: translateX(-50%);
+      z-index: 40; max-width: 90%; padding: 0.8rem 1.1rem; border-radius: 9px;
+      background: rgba(193, 18, 31, 0.16); border: 1px solid var(--seal-text); color: var(--seal-text);
+      font-size: 0.82rem; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
 
     /* Layout */
     .container { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem; }
     header { margin-bottom: 2rem; }
     header h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 0.2rem; }
-    header p { color: var(--graphite); font-size: 0.85rem; }
+    header p { color: var(--graphite); font-size: 0.9rem; }
 
     .card { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--radius); padding: 1.5rem; margin-bottom: 1.25rem; }
-    .card-title { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--graphite); margin-bottom: 1rem; }
+    .card-title { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--graphite); margin-bottom: 1rem; }
 
-    /* Asset chips */
+    /* Asset chips as real buttons */
     .chip-row { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1.1rem; }
     .chip {
-      padding: 0.45rem 0.9rem; border-radius: 999px; border: 1px solid var(--rule);
-      background: var(--panel-2); color: var(--graphite); font-size: 0.8rem; font-weight: 600;
+      padding: 0.45rem 0.95rem; min-height: 38px; border-radius: 999px; border: 1px solid var(--rule);
+      background: var(--panel-2); color: var(--graphite); font-size: 0.82rem; font-weight: 600; font-family: inherit;
       cursor: pointer; user-select: none; transition: all 0.15s;
     }
     .chip:hover { border-color: var(--paper); }
-    .chip.selected { background: var(--paper); color: var(--ink); border-color: var(--paper); }
+    .chip:focus-visible { outline: 2px solid var(--paper); outline-offset: 2px; }
+    .chip[aria-pressed="true"] { background: var(--paper); color: var(--ink); border-color: var(--paper); }
 
-    .controls-row { display: flex; gap: 0.75rem; align-items: end; flex-wrap: wrap; }
-    .field { flex: 1; min-width: 160px; }
-    .field label { display: block; font-size: 0.72rem; color: var(--graphite); margin-bottom: 0.35rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
-    select {
-      width: 100%; padding: 0.55rem 0.7rem; background: var(--panel-2);
-      border: 1px solid var(--rule); border-radius: 8px; color: var(--paper);
-      font-size: 0.85rem; font-family: inherit; outline: none;
-    }
-    select:focus { border-color: var(--paper); }
-
+    .controls-row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+    .controls-row .run-btn { margin-left: auto; }
     button.run-btn {
-      padding: 0.6rem 1.4rem; background: var(--paper); color: var(--ink); border: none;
-      border-radius: 8px; font-size: 0.82rem; font-weight: 700; cursor: pointer;
-      white-space: nowrap; min-height: 38px; transition: opacity 0.15s;
+      padding: 0.6rem 1.4rem; min-height: 44px; background: var(--paper); color: var(--ink); border: none;
+      border-radius: 8px; font-size: 0.85rem; font-weight: 700; cursor: pointer;
+      white-space: nowrap; transition: opacity 0.15s, box-shadow 0.15s;
     }
     button.run-btn:hover { opacity: 0.85; }
-    button.run-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+    button.run-btn.live { background: transparent; color: var(--seal-text); border: 2px solid var(--seal-text); box-shadow: 0 0 0 3px var(--seal-dim); }
+    button.run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
     .halt-notice {
       margin-top: 0.9rem; padding: 0.7rem 0.9rem; border-radius: 8px;
       background: var(--seal-dim); border: 1px solid rgba(193,18,31,0.35);
-      color: var(--paper); font-size: 0.8rem; display: none;
+      color: var(--paper); font-size: 0.82rem; display: none;
     }
     .halt-notice.show { display: block; }
 
-    .help-text { margin-top: 0.7rem; font-size: 0.75rem; color: var(--graphite); line-height: 1.6; }
-    .schedule-note { margin-top: 0.5rem; font-size: 0.7rem; color: var(--graphite); line-height: 1.5; }
+    .help-text { margin-top: 0.7rem; font-size: 0.78rem; color: var(--graphite); line-height: 1.6; }
+    .schedule-note { margin-top: 0.5rem; font-size: 0.75rem; color: var(--graphite); line-height: 1.5; }
 
     /* Tabs */
     .mode-tabs { display: flex; gap: 0; margin-bottom: 1.25rem; border-bottom: 1px solid var(--rule); }
-    .mode-tab { padding: 0.55rem 1rem; font-size: 0.8rem; font-weight: 600; color: var(--graphite); cursor: pointer; border-bottom: 2px solid transparent; background: none; border-top: none; border-left: none; border-right: none; transition: all 0.15s; }
+    .mode-tab { padding: 0.55rem 1rem; font-size: 0.82rem; font-weight: 600; color: var(--graphite); cursor: pointer; border-bottom: 2px solid transparent; background: none; border-top: none; border-left: none; border-right: none; transition: all 0.15s; font-family: inherit; }
     .mode-tab:hover { color: var(--paper); }
+    .mode-tab:focus-visible { outline: 2px solid var(--paper); outline-offset: -2px; }
     .mode-tab.active { color: var(--paper); border-bottom-color: var(--paper); }
     .hidden { display: none; }
 
     /* Tables */
-    .table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
-    .table th { text-align: left; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--rule); font-weight: 600; color: var(--graphite); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    .table th { text-align: left; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--rule); font-weight: 600; color: var(--graphite); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; }
     .table td { padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--rule); }
     .table tr:last-child td { border-bottom: none; }
     .table tr.flagged { background: var(--seal-dim); }
 
-    .badge { display: inline-block; padding: 0.15rem 0.55rem; border-radius: 6px; font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+    .badge { display: inline-block; padding: 0.15rem 0.55rem; border-radius: 6px; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
     .badge-long { background: var(--green-dim); color: var(--green); }
-    .badge-short { background: var(--seal-dim); color: #E0555F; }
+    .badge-short { background: var(--seal-dim); color: var(--seal-text); }
     .badge-neutral { background: rgba(139,141,144,0.15); color: var(--graphite); }
     .badge-approved { background: var(--green-dim); color: var(--green); }
-    .badge-rejected { background: var(--seal-dim); color: #E0555F; }
+    .badge-rejected { background: var(--seal-dim); color: var(--seal-text); }
     .badge-dryrun { background: var(--amber-dim); color: var(--amber); }
 
+    .hash-btn { background: none; border: none; color: var(--graphite); font-family: inherit; font-size: 0.78rem; cursor: pointer; padding: 0; }
+    .hash-btn:hover { color: var(--paper); text-decoration: underline; }
     .meta { display: flex; gap: 2rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
     .meta-item .value { font-size: 1.15rem; font-weight: 700; }
-    .meta-item .key { font-size: 0.68rem; color: var(--graphite); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 0.15rem; }
+    .meta-item .key { font-size: 0.72rem; color: var(--graphite); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 0.15rem; }
 
     .empty-state { text-align: center; padding: 2.5rem; color: var(--graphite); font-size: 0.85rem; }
-    .log-hash { color: var(--graphite); font-size: 0.72rem; }
+    .log-hash { color: var(--graphite); font-size: 0.78rem; }
 
     .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(238,238,238,0.3); border-top-color: var(--paper); border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 0.4rem; }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    .error-box { background: rgba(193, 18, 31, 0.1); border: 1px solid rgba(193, 18, 31, 0.3); border-radius: 8px; padding: 1rem; color: #E0555F; font-size: 0.85rem; margin-bottom: 1rem; }
+    .error-box { background: rgba(193, 18, 31, 0.1); border: 1px solid rgba(193, 18, 31, 0.3); border-radius: 8px; padding: 1rem; color: var(--seal-text); font-size: 0.85rem; margin-bottom: 1rem; }
 
-    footer { text-align: center; padding: 2rem 0 0; color: var(--graphite); font-size: 0.72rem; }
+    footer { text-align: center; padding: 2rem 0 0; color: var(--graphite); font-size: 0.75rem; }
     footer a { color: var(--paper); text-decoration: none; }
+
+    h2.card-title { font-size: 0.8rem; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .gauge-fill, .spinner, .chip, .halt-btn, .mode-tab, button.run-btn { transition: none !important; animation: none !important; }
+      .spinner { display: none; }
+    }
   </style>
 </head>
 <body>
@@ -170,10 +197,18 @@
     <div class="strip-gauge">
       <span class="gauge-label">Risk</span>
       <div class="gauge-track"><div class="gauge-fill" id="gaugeFill" style="width: 0%;"></div></div>
-      <span class="gauge-value num"><span id="gaugeUsed">0</span><span class="dim"> / 500</span></span>
+      <span class="gauge-value num"><span id="gaugeUsed">0</span><span class="dim"> / $<span id="gaugeMax">500</span></span></span>
     </div>
     <button class="halt-btn" id="haltBtn" onclick="toggleHalt()">Halt</button>
+
+    <div class="halt-panel hidden" id="haltPanel">
+      <input id="haltReason" class="halt-input" type="text" placeholder="Reason for halt (required)" aria-label="Kill switch reason" />
+      <button class="halt-confirm" id="haltConfirm" onclick="confirmHalt()">Confirm Halt</button>
+      <button class="halt-cancel" id="haltCancel" onclick="cancelHalt()">Cancel</button>
+    </div>
   </div>
+
+  <div class="toast hidden" id="toast" role="alert" aria-live="assertive"></div>
 
   <div class="container">
     <header>
@@ -182,40 +217,35 @@
     </header>
 
     <div class="card">
-      <div class="card-title">Trading Control</div>
+      <h2 class="card-title">Trading Control</h2>
       <div class="chip-row" id="assetChips">
-        <div class="chip selected" data-asset="BTC-USDT-SWAP">BTC</div>
-        <div class="chip selected" data-asset="ETH-USDT-SWAP">ETH</div>
-        <div class="chip" data-asset="SOL-USDT-SWAP">SOL</div>
-        <div class="chip" data-asset="BNB-USDT-SWAP">BNB</div>
+        <button type="button" class="chip" aria-pressed="true" data-asset="BTC-USDT-SWAP">BTC</button>
+        <button type="button" class="chip" aria-pressed="true" data-asset="ETH-USDT-SWAP">ETH</button>
+        <button type="button" class="chip" aria-pressed="false" data-asset="SOL-USDT-SWAP">SOL</button>
+        <button type="button" class="chip" aria-pressed="false" data-asset="BNB-USDT-SWAP">BNB</button>
       </div>
       <div class="controls-row">
-        <div class="field">
-          <label>Mode</label>
-          <select id="tradeMode">
-            <option value="single">Single Cycle</option>
-          </select>
-        </div>
         <button class="run-btn" id="runBtn" onclick="runCycle()">Run Trading Cycle</button>
+        <span class="dot" id="liveDot" title="Connecting…"></span>
       </div>
       <div class="schedule-note">Serverless: each run is one cycle. Schedule POST /trade repeats (e.g. a Vercel Cron Job) for continuous trading.</div>
       <div class="halt-notice" id="haltNotice">Trading is halted. Resume from the status strip above to run a cycle.</div>
-      <div class="help-text">Dry-run: no real trades are placed and nothing is sent on-chain.</div>
+      <div class="help-text">Dry-run: no real trades are placed and nothing is sent on-chain. <span id="liveWarn" style="color: var(--seal-text); display: none;">Live mode executes real orders on mainnet.</span></div>
     </div>
 
     <div class="card">
-      <div class="mode-tabs">
-        <button class="mode-tab active" onclick="switchTab('cycle', event)">Trading Cycle</button>
-        <button class="mode-tab" onclick="switchTab('audit', event)">Audit Trail</button>
-        <button class="mode-tab" onclick="switchTab('stats', event)">Risk Stats</button>
+      <div class="mode-tabs" role="tablist" aria-label="Results">
+        <button class="mode-tab active" role="tab" aria-selected="true" id="tab-cycle" onclick="switchTab('cycle', event)">Trading Cycle</button>
+        <button class="mode-tab" role="tab" aria-selected="false" id="tab-audit" onclick="switchTab('audit', event)">Audit Trail</button>
+        <button class="mode-tab" role="tab" aria-selected="false" id="tab-stats" onclick="switchTab('stats', event)">Risk Stats</button>
       </div>
 
-      <div id="cycleTab">
+      <div id="cycleTab" role="tabpanel" aria-labelledby="tab-cycle">
         <div id="cycleResults" class="empty-state">Run a cycle to see signals, risk decisions and executions here.</div>
       </div>
 
-      <div id="auditTab" class="hidden">
-        <div class="card-title">Recent On-Chain Decisions</div>
+      <div id="auditTab" class="hidden" role="tabpanel" aria-labelledby="tab-audit">
+        <h2 class="card-title">Recent On-Chain Decisions</h2>
         <table class="table">
           <thead><tr><th>Time</th><th>Asset</th><th>Side</th><th>Size</th><th>Hash</th></tr></thead>
           <tbody id="auditBody">
@@ -224,28 +254,24 @@
         </table>
       </div>
 
-      <div id="statsTab" class="hidden">
-        <div class="card-title">Daily Risk Limits</div>
+      <div id="statsTab" class="hidden" role="tabpanel" aria-labelledby="tab-stats">
+        <h2 class="card-title">Daily Risk Limits</h2>
         <div class="meta">
-          <div class="meta-item"><div class="value num" id="statLoss">0.00</div><div class="key">Daily Loss (USD)</div></div>
-          <div class="meta-item"><div class="value num" id="statTrades">0 / 0</div><div class="key">Trades Today</div></div>
-          <div class="meta-item"><div class="value num" id="statPosition">0</div><div class="key">Position (USD)</div></div>
-          <div class="meta-item"><div class="value num" id="statPnl">0.00</div><div class="key">Daily P&amp;L</div></div>
+          <div class="meta-item"><div class="value num" id="statLoss">–</div><div class="key">Daily Loss (USD)</div></div>
+          <div class="meta-item"><div class="value num" id="statTrades">– / –</div><div class="key">Trades Today</div></div>
+          <div class="meta-item"><div class="value num" id="statPosition">–</div><div class="key">Position (USD)</div></div>
+          <div class="meta-item"><div class="value num" id="statPnl">–</div><div class="key">Daily P&amp;L</div></div>
         </div>
-        <div class="card-title" style="margin-top: 1.5rem;">Risk Parameters</div>
+        <h2 class="card-title" style="margin-top: 1.5rem;">Risk Parameters</h2>
         <table class="table">
           <thead><tr><th>Parameter</th><th>Limit</th></tr></thead>
           <tbody id="riskParamsBody">
-            <tr><td>Max Position</td><td class="num">$5,000</td></tr>
-            <tr><td>Max Daily Loss</td><td class="num">$500</td></tr>
-            <tr><td>Max Daily Trades</td><td class="num">10</td></tr>
-            <tr><td>Max Leverage</td><td class="num">5.0x</td></tr>
-            <tr><td>Min Confidence</td><td class="num">70%</td></tr>
+            <tr><td colspan="2" class="empty-state">Loading...</td></tr>
           </tbody>
         </table>
       </div>
 
-      <div id="errorBox" class="error-box hidden"></div>
+      <div id="errorBox" class="error-box hidden" role="alert" aria-live="assertive"></div>
     </div>
   </div>
 
@@ -257,14 +283,19 @@
     let halted = false;
     let dryRun = true;
     let dailyLoss = 0;
-    const dailyLossLimit = 500;
+    let dailyLossLimit = 500;
+    let cycling = false;
 
     function updateGauge() {
-      const pct = Math.min(100, (dailyLoss / dailyLossLimit) * 100);
+      const pct = dailyLossLimit > 0 ? Math.min(100, (dailyLoss / dailyLossLimit) * 100) : 0;
       const fill = document.getElementById('gaugeFill');
       fill.style.width = pct + '%';
       fill.className = 'gauge-fill' + (pct >= 90 ? ' danger' : pct >= 60 ? ' warn' : '');
       document.getElementById('gaugeUsed').textContent = dailyLoss.toFixed(0);
+    }
+
+    function runBtnLabel() {
+      return dryRun ? 'Run Trading Cycle' : 'Run Live Trade';
     }
 
     function updateModeIndicator() {
@@ -273,60 +304,97 @@
       const haltBtn = document.getElementById('haltBtn');
       const runBtn = document.getElementById('runBtn');
       const notice = document.getElementById('haltNotice');
+      const liveWarn = document.getElementById('liveWarn');
 
-      if (halted) {
-        dot.className = 'dot halted';
-        label.textContent = 'Halted';
-        haltBtn.textContent = 'Resume';
-        haltBtn.classList.add('active');
-        runBtn.disabled = true;
-        notice.classList.add('show');
-      } else {
-        dot.className = 'dot' + (dryRun ? '' : ' live');
-        label.textContent = dryRun ? 'Dry-Run' : 'Live';
-        haltBtn.textContent = 'Halt';
-        haltBtn.classList.remove('active');
-        runBtn.disabled = false;
-        notice.classList.remove('show');
-      }
+      dot.className = 'dot' + (halted ? ' halted' : (dryRun ? '' : ' live'));
+      label.textContent = halted ? 'Halted' : (dryRun ? 'Dry-Run' : 'Live');
+
+      haltBtn.textContent = halted ? 'Resume' : 'Halt';
+      haltBtn.classList.toggle('active', halted);
+      // Halt is disabled while a cycle is in flight: it cannot stop the
+      // running request, so it would falsely imply the cycle was cancelled.
+      haltBtn.disabled = cycling || (halted && false) ? false : cycling;
+      if (!halted && cycling) haltBtn.disabled = true;
+      if (halted) haltBtn.disabled = false;
+
+      runBtn.disabled = halted || cycling;
+      runBtn.textContent = cycling ? runBtn.textContent : runBtnLabel();
+      runBtn.classList.toggle('live', !dryRun && !halted);
+      runBtn.style.display = '';
+
+      liveWarn.style.display = dryRun ? 'none' : 'inline';
+      notice.classList.toggle('show', halted);
+      notice.textContent = halted
+        ? 'Trading is halted. Click Resume in the status strip to allow the next cycle.'
+        : 'Trading is halted. Resume from the status strip above to run a cycle.';
     }
 
     async function toggleHalt() {
-      const btn = document.getElementById('haltBtn');
+      if (cycling) return;
       hideError();
 
-      try {
-        if (halted) {
-          // Resume — call deactivate endpoint
+      if (halted) {
+        // Resume — deactivate directly (no reason needed).
+        try {
           const res = await fetch('/kill-switch/deactivate', { method: 'POST' });
           const data = await res.json();
           if (!res.ok) throw new Error(data.detail || data.error || 'Failed to deactivate kill switch');
-        } else {
-          // Halt — ask for reason then activate
-          const reason = window.prompt('Enter kill switch reason (required):');
-          if (!reason || !reason.trim()) return;
-          const res = await fetch('/kill-switch/activate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ reason: reason.trim() }),
-          });
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.detail || data.error || 'Failed to activate kill switch');
+          await loadStats();
+        } catch (err) {
+          showError('Kill switch error: ' + err.message);
         }
+        return;
+      }
 
+      // Halt requested — reveal the inline reason panel (no blocking prompt).
+      const panel = document.getElementById('haltPanel');
+      if (panel.classList.contains('hidden')) {
+        panel.classList.remove('hidden');
+        document.getElementById('haltReason').focus();
+      }
+    }
+
+    async function confirmHalt() {
+      const reasonEl = document.getElementById('haltReason');
+      const reason = (reasonEl.value || '').trim();
+      if (!reason) { showError('A reason is required to halt trading.'); reasonEl.focus(); return; }
+      cancelHaltUI();
+      try {
+        const res = await fetch('/kill-switch/activate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: reason }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || data.error || 'Failed to activate kill switch');
         await loadStats();
       } catch (err) {
         showError('Kill switch error: ' + err.message);
       }
     }
 
+    function cancelHalt() { cancelHaltUI(); }
+
+    function cancelHaltUI() {
+      const panel = document.getElementById('haltPanel');
+      panel.classList.add('hidden');
+      document.getElementById('haltReason').value = '';
+    }
+
     document.querySelectorAll('.chip').forEach(chip => {
-      chip.addEventListener('click', () => chip.classList.toggle('selected'));
+      chip.addEventListener('click', () => {
+        const pressed = chip.getAttribute('aria-pressed') === 'true';
+        chip.setAttribute('aria-pressed', String(!pressed));
+      });
     });
 
     function switchTab(tab, evt) {
-      document.querySelectorAll('.mode-tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.mode-tab').forEach(t => {
+        t.classList.remove('active');
+        t.setAttribute('aria-selected', 'false');
+      });
       evt.currentTarget.classList.add('active');
+      evt.currentTarget.setAttribute('aria-selected', 'true');
       document.getElementById('cycleTab').classList.toggle('hidden', tab !== 'cycle');
       document.getElementById('auditTab').classList.toggle('hidden', tab !== 'audit');
       document.getElementById('statsTab').classList.toggle('hidden', tab !== 'stats');
@@ -340,19 +408,33 @@
       return '<span class="badge ' + (map[kind][value] || 'badge-neutral') + '">' + value + '</span>';
     }
 
+    function shortHash(h) { return h ? h.substring(0, 10) + '...' : '-'; }
+    function hashCell(h) {
+      if (!h) return 'N/A';
+      return '<button class="hash-btn" title="Copy full hash: ' + h + '" onclick="copyHash(\'' + h + '\')">' + shortHash(h) + '</button>';
+    }
+    async function copyHash(h) {
+      try { await navigator.clipboard.writeText(h); } catch (e) { /* clipboard blocked; title tooltip still shows full value */ }
+    }
+
     async function runCycle() {
-      if (halted) return;
+      if (halted || cycling) return;
       const btn = document.getElementById('runBtn');
       hideError();
+      cancelHaltUI();
 
-      const assets = Array.from(document.querySelectorAll('#assetChips .chip.selected'))
+      const assets = Array.from(document.querySelectorAll('#assetChips .chip[aria-pressed="true"]'))
                           .map(c => c.getAttribute('data-asset'));
-      if (!assets.length) {
-        showError('Please select at least one asset.');
-        return;
+      if (!assets.length) { showError('Please select at least one asset.'); return; }
+
+      // LIVE GUARD: real orders hit mainnet — require explicit confirmation.
+      if (!dryRun) {
+        const ok = window.confirm('LIVE MODE: this will execute real orders on mainnet. Continue?');
+        if (!ok) return;
       }
 
-      const mode = document.getElementById('tradeMode').value;
+      cycling = true;
+      updateModeIndicator();
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner"></span> Trading...';
 
@@ -360,73 +442,65 @@
         const res = await fetch('/trade', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ assets: assets, mode: mode, interval_seconds: 300 }),
+          body: JSON.stringify({ assets: assets, mode: 'single', interval_seconds: 300 }),
         });
-
         const data = await res.json();
-
-        if (!res.ok) {
-          throw new Error(data.detail || data.error || ('Request failed (' + res.status + ')'));
-        }
-
+        if (!res.ok) throw new Error(data.detail || data.error || ('Request failed (' + res.status + ')'));
         renderCycleResult(data);
       } catch (err) {
         showError('Network error: ' + err.message);
       } finally {
+        cycling = false;
         btn.disabled = false;
-        btn.textContent = 'Run Trading Cycle';
+        btn.textContent = runBtnLabel();
+        updateModeIndicator();
       }
     }
 
     function renderCycleResult(result) {
       dryRun = result.dry_run;
-      dailyLoss = result.total_pnl_usd < 0 ? Math.abs(result.total_pnl_usd) : 0;
-      updateGauge();
-      updateModeIndicator();
+      // Gauge is driven by /risk-stats only (loadStats), NOT by the last
+      // cycle's P&L — a profitable cycle must not reset the loss gauge.
 
       const container = document.getElementById('cycleResults');
       container.classList.remove('hidden', 'empty-state');
 
       let html = '';
-
       if (result.errors && result.errors.length > 0) {
-        html += '<div class="card-title">Errors</div><div style="margin-bottom: 1rem;">';
+        html += '<h2 class="card-title">Errors</h2><div style="margin-bottom: 1rem;">';
         result.errors.forEach(err => {
-          html += '<div style="color: #E0555F; font-size: 0.8rem; margin-bottom: 0.25rem;">' + err + '</div>';
+          html += '<div style="color: var(--seal-text); font-size: 0.82rem; margin-bottom: 0.25rem;">' + err + '</div>';
         });
         html += '</div>';
       }
 
-      html += '<div style="margin-bottom: 1rem;"><strong>Cycle ID:</strong> ' + result.cycle_id + '</div>';
-      html += '<div style="margin-bottom: 1rem;"><strong>Timestamp:</strong> ' + new Date(result.timestamp * 1000).toLocaleString() + '</div>';
+      html += '<div style="margin-bottom: 1rem;"><strong>Cycle ID:</strong> ' + (result.cycle_id || '-') + '</div>';
+      html += '<div style="margin-bottom: 1rem;"><strong>Timestamp:</strong> ' + new Date((result.timestamp || 0) * 1000).toLocaleString() + '</div>';
 
-      // Signals
-      html += '<div class="card-title">Signals</div>';
+      html += '<h2 class="card-title">Signals</h2>';
       html += '<table class="table"><thead><tr><th>Asset</th><th>Signal</th><th>Confidence</th><th>Rationale</th></tr></thead><tbody>';
       (result.signals || []).forEach(sig => {
-        html += '<tr><td>' + sig.asset + '</td><td>' + badgeFor('signal', sig.action) + '</td><td class="num">' + Math.round(sig.confidence * 100) + '%</td><td style="color: var(--graphite); font-size: 0.75rem;">' + (sig.rationale || '') + '</td></tr>';
+        html += '<tr><td>' + sig.asset + '</td><td>' + badgeFor('signal', sig.action) + '</td><td class="num">' + Math.round((sig.confidence || 0) * 100) + '%</td><td style="color: var(--graphite); font-size: 0.78rem;">' + (sig.rationale || '') + '</td></tr>';
       });
       html += '</tbody></table>';
 
-      // Risk decisions with visual rejection flags
-      html += '<div class="card-title" style="margin-top: 1.5rem;">Risk Decisions</div>';
+      html += '<h2 class="card-title" style="margin-top: 1.5rem;">Risk Decisions</h2>';
       if (result.decisions && result.decisions.length > 0) {
         html += '<table class="table"><thead><tr><th>Asset</th><th>Side</th><th>Size (USD)</th><th>Confidence</th><th>Status</th><th>Hash</th></tr></thead><tbody>';
         result.decisions.forEach(dec => {
           const rowCls = dec.status === 'rejected' ? ' class="flagged"' : '';
-          html += '<tr' + rowCls + '><td>' + dec.asset + '</td><td>' + (dec.side || '-') + '</td><td class="num">' + (dec.size_usd ? dec.size_usd.toFixed(0) : '-') + '</td><td class="num">' + Math.round((dec.confidence || 0) * 100) + '%</td><td>' + badgeFor('status', dec.status) + '</td><td class="log-hash num">' + (dec.risk_hash ? dec.risk_hash.substring(0, 10) + '...' : '-') + '</td></tr>';
+          html += '<tr' + rowCls + '><td>' + dec.asset + '</td><td>' + (dec.side || '-') + '</td><td class="num">' + (dec.size_usd ? dec.size_usd.toFixed(0) : '-') + '</td><td class="num">' + Math.round((dec.confidence || 0) * 100) + '%</td><td>' + badgeFor('status', dec.status) + '</td><td class="log-hash num">' + hashCell(dec.risk_hash) + '</td></tr>';
         });
         html += '</tbody></table>';
       } else {
         html += '<div class="empty-state">No decisions in this cycle</div>';
       }
 
-      // Executions
-      html += '<div class="card-title" style="margin-top: 1.5rem;">Executions</div>';
+      html += '<h2 class="card-title" style="margin-top: 1.5rem;">Executions</h2>';
       if (result.executions && result.executions.length > 0) {
         html += '<table class="table"><thead><tr><th>Asset</th><th>Side</th><th>Size (USD)</th><th>Price</th><th>Tx Hash</th><th>Status</th></tr></thead><tbody>';
         result.executions.forEach(ex => {
-          html += '<tr><td>' + ex.asset + '</td><td>' + (ex.side || '-') + '</td><td class="num">' + (ex.size_usd ? ex.size_usd.toFixed(0) : '-') + '</td><td class="num">' + (ex.fill_price || '-') + '</td><td class="log-hash num">' + (ex.tx_hash ? ex.tx_hash.substring(0, 10) + '...' : 'N/A') + '</td><td>' + badgeFor('status', ex.status) + '</td></tr>';
+          html += '<tr><td>' + ex.asset + '</td><td>' + (ex.side || '-') + '</td><td class="num">' + (ex.size_usd ? ex.size_usd.toFixed(0) : '-') + '</td><td class="num">' + (ex.fill_price || '-') + '</td><td class="log-hash num">' + hashCell(ex.tx_hash) + '</td><td>' + badgeFor('status', ex.status) + '</td></tr>';
         });
         html += '</tbody></table>';
       } else {
@@ -434,11 +508,12 @@
       }
 
       if (result.total_pnl_usd !== undefined) {
-        html += '<div class="card-title" style="margin-top: 1.5rem;">Cycle Summary</div>';
+        html += '<h2 class="card-title" style="margin-top: 1.5rem;">Cycle Summary</h2>';
         html += '<div class="meta">';
-        const pnlColor = result.total_pnl_usd >= 0 ? 'color: var(--green);' : 'color: #E0555F;';
-        html += '<div class="meta-item"><div class="value num" style="' + pnlColor + '">' + result.total_pnl_usd.toFixed(2) + ' USDT</div><div class="key">Total P&amp;L</div></div>';
-        html += '<div class="meta-item"><div class="value num" style="color: var(--graphite);">' + result.total_fees_usd.toFixed(2) + ' USDT</div><div class="key">Total Fees</div></div>';
+        const pnl = result.total_pnl_usd || 0;
+        const pnlColor = pnl >= 0 ? 'color: var(--green);' : 'color: var(--seal-text);';
+        html += '<div class="meta-item"><div class="value num" style="' + pnlColor + '">' + pnl.toFixed(2) + ' USDT</div><div class="key">Total P&amp;L</div></div>';
+        html += '<div class="meta-item"><div class="value num" style="color: var(--graphite);">' + (result.total_fees_usd || 0).toFixed(2) + ' USDT</div><div class="key">Total Fees</div></div>';
         html += '<div class="meta-item"><div class="value num">' + (result.errors ? result.errors.length : 0) + '</div><div class="key">Errors</div></div>';
         html += '</div>';
       }
@@ -449,61 +524,111 @@
     async function loadStats() {
       try {
         const riskRes = await fetch('/risk-stats');
-        if (riskRes.ok) {
-          const stats = await riskRes.json();
-          dailyLoss = stats.daily_loss_usd || 0;
-          halted = stats.kill_switch?.active || false;
-          updateGauge();
-          updateModeIndicator();
+        if (!riskRes.ok) throw new Error('risk-stats request failed');
+        const stats = await riskRes.json();
 
-          document.getElementById('statLoss').textContent = dailyLoss.toFixed(0);
-          document.getElementById('statTrades').textContent = stats.daily_trade_count + ' / ' + stats.max_daily_trades;
-          document.getElementById('statPosition').textContent = stats.position_size_usd.toFixed(0);
-          document.getElementById('statPnl').textContent = stats.daily_pnl_usd.toFixed(2);
-          if (stats.daily_pnl_usd >= 0) {
-            document.getElementById('statPnl').style.color = 'var(--green)';
-          } else {
-            document.getElementById('statPnl').style.color = '#E0555F';
-          }
+        dryRun = stats.dry_run !== undefined ? stats.dry_run : dryRun;
+        dailyLoss = stats.daily_loss_usd || 0;
+        dailyLossLimit = stats.max_daily_loss_usd || dailyLossLimit;
+        halted = stats.kill_switch && stats.kill_switch.active || false;
 
-          document.getElementById('riskParamsBody').innerHTML =
-            '<tr><td>Max Position</td><td class="num">$' + stats.max_position_usd.toFixed(0) + '</td></tr>' +
-            '<tr><td>Max Daily Loss</td><td class="num">$' + stats.max_daily_loss_usd.toFixed(0) + '</td></tr>' +
-            '<tr><td>Max Daily Trades</td><td class="num">' + stats.max_daily_trades + '</td></tr>' +
-            '<tr><td>Max Leverage</td><td class="num">' + stats.max_leverage.toFixed(1) + 'x</td></tr>' +
-            '<tr><td>Min Confidence</td><td class="num">' + (stats.min_confidence_bps / 100).toFixed(1) + '%</td></tr>';
-        }
+        document.getElementById('gaugeMax').textContent = dailyLossLimit.toFixed(0);
+        updateGauge();
+        updateModeIndicator();
+
+        document.getElementById('statLoss').textContent = (stats.daily_loss_usd || 0).toFixed(0);
+        document.getElementById('statTrades').textContent = (stats.daily_trade_count || 0) + ' / ' + (stats.max_daily_trades || 0);
+        document.getElementById('statPosition').textContent = (stats.position_size_usd || 0).toFixed(0);
+        const pnl = stats.daily_pnl_usd || 0;
+        const pnlEl = document.getElementById('statPnl');
+        pnlEl.textContent = pnl.toFixed(2);
+        pnlEl.style.color = pnl >= 0 ? 'var(--green)' : 'var(--seal-text)';
+
+        document.getElementById('riskParamsBody').innerHTML =
+          '<tr><td>Max Position</td><td class="num">$' + (stats.max_position_usd || 0).toFixed(0) + '</td></tr>' +
+          '<tr><td>Max Daily Loss</td><td class="num">$' + (stats.max_daily_loss_usd || 0).toFixed(0) + '</td></tr>' +
+          '<tr><td>Max Daily Trades</td><td class="num">' + (stats.max_daily_trades || 0) + '</td></tr>' +
+          '<tr><td>Max Leverage</td><td class="num">' + (stats.max_leverage || 0).toFixed(1) + 'x</td></tr>' +
+          '<tr><td>Min Confidence</td><td class="num">' + ((stats.min_confidence_bps || 0) / 100).toFixed(1) + '%</td></tr>';
 
         const auditRes = await fetch('/audit-stats?days=7');
-        if (auditRes.ok) {
-          const audit = await auditRes.json();
-          const body = document.getElementById('auditBody');
-          if (audit.decisions && audit.decisions.length > 0) {
-            body.innerHTML = audit.decisions.slice(0, 10).map(d =>
-              '<tr><td class="num">' + new Date(d.timestamp * 1000).toLocaleTimeString() + '</td><td>' + d.asset + '</td><td>' + (d.side || '-') + '</td><td class="num">' + (d.size_usd || 0).toFixed(0) + '</td><td class="log-hash num">' + (d.risk_hash ? d.risk_hash.substring(0, 10) + '...' : '-') + '</td></tr>'
-            ).join('');
-          } else {
-            body.innerHTML = '<tr><td colspan="5" class="empty-state">No on-chain decisions yet</td></tr>';
-          }
+        if (!auditRes.ok) throw new Error('audit-stats request failed');
+        const audit = await auditRes.json();
+        const body = document.getElementById('auditBody');
+        if (audit.decisions && audit.decisions.length > 0) {
+          body.innerHTML = audit.decisions.slice(0, 10).map(d =>
+            '<tr><td class="num">' + new Date((d.timestamp || 0) * 1000).toLocaleString() + '</td><td>' + d.asset + '</td><td>' + (d.side || '-') + '</td><td class="num">' + (d.size_usd || 0).toFixed(0) + '</td><td class="log-hash num">' + hashCell(d.risk_hash) + '</td></tr>'
+          ).join('');
+        } else {
+          body.innerHTML = '<tr><td colspan="5" class="empty-state">No on-chain decisions yet</td></tr>';
         }
       } catch (err) {
-        console.error('Failed to load stats:', err);
+        const body = document.getElementById('auditBody');
+        if (body) body.innerHTML = '<tr><td colspan="5" class="empty-state">Stats unavailable: ' + err.message + '</td></tr>';
+        document.getElementById('riskParamsBody').innerHTML = '<tr><td colspan="2" class="empty-state">Stats unavailable: ' + err.message + '</td></tr>';
       }
     }
 
+    let toastTimer = null;
     function showError(msg) {
       const box = document.getElementById('errorBox');
       box.textContent = msg;
       box.classList.remove('hidden');
+      const toast = document.getElementById('toast');
+      toast.textContent = msg;
+      toast.classList.remove('hidden');
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.add('hidden'), 6000);
     }
 
     function hideError() {
       document.getElementById('errorBox').classList.add('hidden');
+      document.getElementById('toast').classList.add('hidden');
+    }
+
+    /* Live cycle stream: connect to the WebSocket and render each completed
+       cycle as it arrives. Falls back to polling /risk-stats if WebSocket is
+       unavailable (e.g. some serverless deployments don't support it). */
+    let liveSocket = null;
+    let pollTimer = null;
+
+    function setLive(on, label) {
+      const d = document.getElementById('liveDot');
+      if (!d) return;
+      d.className = 'dot' + (on ? ' live' : '');
+      d.title = label || (on ? 'Live (WebSocket)' : 'Polling');
+    }
+
+    function startPolling() {
+      if (pollTimer) return;
+      pollTimer = setInterval(() => { loadStats(); }, 5000);
+    }
+
+    function connectLive() {
+      if (!('WebSocket' in window)) { setLive(false, 'Polling (no WebSocket)'); startPolling(); return; }
+      const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+      try {
+        liveSocket = new WebSocket(proto + location.host + '/ws/cycles');
+        liveSocket.onopen = () => { setLive(true); if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } };
+        liveSocket.onmessage = (ev) => {
+          try {
+            const data = JSON.parse(ev.data);
+            renderCycleResult(data);
+            loadStats();
+          } catch (e) { /* ignore malformed frame */ }
+        };
+        liveSocket.onclose = () => { setLive(false, 'Reconnecting…'); setTimeout(connectLive, 3000); };
+        liveSocket.onerror = () => { if (liveSocket) liveSocket.close(); };
+      } catch (e) {
+        setLive(false, 'Polling (no WebSocket)');
+        startPolling();
+      }
     }
 
     updateGauge();
     updateModeIndicator();
     loadStats();
+    connectLive();
   </script>
 </body>
 </html>

@@ -26,6 +26,36 @@ Market Data → Signal Engine → Risk Gate → Onchain Logger → Execution
 
 3. **Multi-agent pipeline**: Inspired by TradingAgents research paper — separate specialized agents for market data, signal generation, risk evaluation, and execution.
 
+## Ported Governance Layers
+
+Five modules ported from a sibling MVP so the live signal set gets the same
+pre-trade governance a funding-arbitrage desk would demand (`config/profiles.yaml`
+drives the curator):
+
+- **Pre-signal data integrity gate** (`src/data_integrity.py`) — runs BEFORE
+  signal generation (Phase 1.5), so a stale/NaN feed or an unreconciled ledger
+  blocks the asset before any trade is ever *considered*. Hard blocks are
+  audited. Toggle staleness via `DATA_STALENESS_SECONDS`.
+- **Curator profile selector** (`src/curator.py`) — selects only from a fixed
+  profile allowlist (never writes raw risk params), enforces a switch cooldown,
+  auto-reverts on underperformance, and forces `defensive` on drawdown breach.
+  Integration is **default-passthrough**: the profile is the default per knob;
+  `CURATOR_*` env vars override only the knob they name.
+- **Atomic multi-leg execution** (`src/multi_leg.py`) — a two+ leg package
+  dispatched concurrently through an explicit state machine
+  (PENDING_FILL → LOCKED → SETTLED, or ABORTED). Partial fills unwind the
+  filled leg immediately; unlike the source MVP, per-leg `max_slippage_pct` is
+  actually enforced — a breached fill triggers the unwind path, never LOCKED.
+- **Strategy validation** (`src/validation.py`) — walk-forward windows, PBO,
+  Sharpe/CAGR/max-drawdown/Calmar, and a `cleared_for_paper_trading` gate
+  (Calmar ≥ 1.0 AND PBO ≤ 0.5). Surface: `GET /api/v1/validation`.
+- **Local append-only audit log** (`src/audit_trail.py`) — JSONL log (default
+  `audit_log.jsonl`, override `AUDIT_LOG_PATH`) recording every curator switch,
+  integrity block, confidence-floor skip, and risk-gate rejection, complementing
+  the on-chain decision log. Surface: `GET /api/v1/curator-profile`.
+
+Tests: `python -m pytest tests/ -q` — 176 tests, fully offline.
+
 ## Files
 
 ```
@@ -37,17 +67,32 @@ Portfolio-risk-copilot/
 │   ├── scripts/deploy.py                 # Python deploy script
 │   └── scripts/deploy.js                 # Hardhat deploy script
 ├── src/
-│   ├── main.py          # FastAPI: /hire, /trade, /audit-stats, /risk-stats, /kill-switch
+│   ├── main.py          # FastAPI: /hire, /trade, /audit-stats, /risk-stats,
+│   │                    #   /kill-switch, /api/v1/{validation,curator-profile}
 │   ├── agent.py         # Multi-agent orchestrator
 │   ├── signals.py       # Signal: mean rev + momentum + funding
 │   ├── execution.py     # OrderExecutor + RiskGate (non-overridable)
 │   ├── audit_logger.py  # OnchainLogger (X Layer)
 │   ├── auditor.py       # Existing risk audit (extended)
-│   └── okx_cli.py       # OKX CLI wrapper
+│   ├── okx_cli.py       # OKX CLI wrapper
+│   ├── validation.py    # Walk-forward + PBO + Calmar strategy validation gate
+│   ├── data_integrity.py# Pre-signal integrity gate (staleness/NaN/ledger/orphan)
+│   ├── audit_trail.py   # Local append-only JSONL audit log
+│   ├── multi_leg.py     # Atomic multi-leg execution (state machine, simulated fills)
+│   └── curator.py       # Profile selector (allowlist, cooldown, auto-revert)
+├── config/
+│   └── profiles.yaml    # Fixed profile allowlist for the curator
 ├── tests/
-│ ├── test_signals.py     # 15 signal tests
-│ ├── test_execution.py   # 20 risk gate tests (incl. kill switch)
-│ └── test_auditor.py     # 24 audit tests
+│ ├── test_signals.py       # 15 signal tests
+│ ├── test_execution.py     # 20 risk gate tests (incl. kill switch)
+│ ├── test_auditor.py       # 24 audit tests
+│ ├── test_validation.py    # validation pipeline
+│ ├── test_data_integrity.py # integrity gate
+│ ├── test_audit_trail.py   # local audit log
+│ ├── test_multi_leg.py     # multi-leg state machine (incl. slippage unwind)
+│ ├── test_curator.py       # curator + default-passthrough env knobs
+│ ├── test_agent_wiring.py  # integrity + curator wired into the trading loop
+│ └── test_agent_sizing.py  # fractional-Kelly sizing
 ├── scripts/
 │   ├── smoke_test.py            # Legacy audit smoke test
 │   └── smoke_test_trading.py    # Trading pipeline smoke test
@@ -135,7 +180,7 @@ curl -X POST http://localhost:8000/hire \
 
 ## Smart Contract: TradeAuditTrail.sol
 
-**Deployed on**: X Layer Testnet (chainId: 195)
+**Deployed on**: X Layer Testnet (chainId: 1952)
 **Native USDC**: Supported (CCTP-ready, MiCA-compliant)
 
 ### Contract Functions
@@ -157,18 +202,3 @@ curl -X POST http://localhost:8000/hire \
 - **Tightening only**: Risk params can only become stricter
 - **No relayer bypass**: `onlyAgent` modifier prevents third-party calls
 
-## Hackathon Alignment
-
-| Requirement | Status |
-|---|---|
-| Incorporate AI elements | Multi-strategy signal engine with ensemble voting |
-| Deploy on X Layer | Solidity contract + Python backend on X Layer |
-| Active X account | [@AuditTrailTrader](https://twitter.com/AuditTrailTrader) |
-| Tag @XLayerOfficial | On submission post |
-| Google Form by Aug 21 | [Link](https://docs.google.com/forms/d/e/1FAIpQLSfgU_3zcXdxK0GJQxj33QeUWdEcAaYnieVe9p5cFDb2JFQa4Q/viewform) |
-
-## Prize Track Opportunities
-
-1. **AI-RWA track** (50K Liquidity Grant) — Can tokenize risk-adjusted yield strategies
-2. **Launch Grant** (up to 200K) — Trading volume via OKX DEX interface
-3. **Hackathon Grant** (30K 1st place) — Product completeness + innovation

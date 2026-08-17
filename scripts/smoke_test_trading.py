@@ -16,6 +16,7 @@ Run: python3 scripts/smoke_test_trading.py
 import asyncio
 import sys
 import pathlib
+import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -148,7 +149,11 @@ def test_risk_gate():
         order_type="market",
         size="1000",
     )
-    result = gate.check_order(order, "test_agent")
+    result = gate.check_order(
+        order, "test_agent",
+        current_price=50000,
+        current_price_timestamp=time.time(),
+    )
     check("Valid order approved", result.approved)
     check("Code is APPROVED", result.code == "APPROVED")
 
@@ -182,8 +187,16 @@ def test_risk_gate():
         order_type="market",
         size="1000",
     )
-    gate2.check_order(order, "agent_a")
-    result = gate2.check_order(order, "agent_a")
+    gate2.check_order(
+        order, "agent_a",
+        current_price=50000,
+        current_price_timestamp=time.time(),
+    )
+    result = gate2.check_order(
+        order, "agent_a",
+        current_price=50000,
+        current_price_timestamp=time.time(),
+    )
     check("Trade limit exceeded rejected", not result.approved)
     check("Code is DAILY_TRADE_LIMIT_EXCEEDED", result.code == "DAILY_TRADE_LIMIT_EXCEEDED")
 
@@ -252,7 +265,11 @@ def test_full_pipeline():
             max_position_usd=5000,
             min_confidence_bps=7000,
         )
-        result = gate.check_order(order, "pipeline_test")
+        result = gate.check_order(
+            order, "pipeline_test",
+            current_price=50000,
+            current_price_timestamp=time.time(),
+        )
         check("Order passes risk gate", result.approved)
         check("Order is LONG buy", order.side == "buy")
         check("Order size valid", float(order.size) <= 5000)
