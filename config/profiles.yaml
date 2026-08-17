@@ -1,36 +1,36 @@
-# Curator profile allowlist — the ONLY risk-parameter vocabulary the curator
-# may select from. The curator never writes raw risk/sizing params; it switches
-# between these pre-bounded profiles. See src/curator.py and
-# docs/adr/0001-fractional-kelly.md.
+# Fixed, human-reviewed profile allowlist for the curator agent.
+# The curator selects a NAME from this file. It never writes raw parameters.
+# Any name the curator emits that isn't a key here is rejected, not coerced.
 #
-# Knob semantics (bps vocabulary, matching src/execution.py RiskGate):
-#   position_size_multiplier  — fraction of half-Kelly base applied at sizing
-#   confidence_floor_bps      — minimum ensemble confidence (0-10000 bps)
-#   max_leverage              — max implied leverage for the profile (<= gate cap)
-#   enabled_signals           — signal strategies allowed in this profile
-
-default_profile: standard
-cooldown_cycles: 24
-auto_revert_lookback_trades: 10
-auto_revert_threshold_pnl: -0.01
+# Adapted from the trading_system MVP profiles to the copilot's risk-gate
+# vocabulary: confidence floors are in basis points (bps, 0..10000) to match
+# RiskGate.min_confidence_bps and Signal.confidence_bps.
 
 profiles:
+  conservative:
+    position_size_multiplier: 0.35
+    confidence_floor_bps: 7500
+    enabled_signals: ["funding_rate"]
+    max_leverage: 1.5
+
   standard:
     position_size_multiplier: 0.65
-    confidence_floor_bps: 7500
-    max_leverage: 1.0
-    enabled_signals:
-      - funding_rate
-  conservative:
-    position_size_multiplier: 0.40
-    confidence_floor_bps: 9000
-    max_leverage: 0.5
-    enabled_signals:
-      - mean_reversion
-      - funding_rate
+    confidence_floor_bps: 6000
+    enabled_signals: ["funding_rate"]
+    max_leverage: 2.0
+
   defensive:
-    position_size_multiplier: 0.25
+    position_size_multiplier: 0.10
     confidence_floor_bps: 9000
-    max_leverage: 0.5
-    enabled_signals:
-      - mean_reversion
+    enabled_signals: []          # no new trades opened, only unwinds
+    max_leverage: 1.0
+
+default_profile: standard
+
+# Curator cannot switch more often than this (cooldown).
+cooldown_cycles: 12
+
+# If a switch underperforms the prior profile's trailing PnL over this many
+# trades since the switch, auto-revert without waiting for a human.
+auto_revert_lookback_trades: 8
+auto_revert_threshold_pnl: -0.01   # revert if trailing PnL since switch < -1%

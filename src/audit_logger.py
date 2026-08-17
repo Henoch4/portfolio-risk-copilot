@@ -18,6 +18,7 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
+from typing import Any
 from pathlib import Path
 
 from web3 import Web3 as Web
@@ -201,7 +202,7 @@ class OnchainLogger:
             self._nonce_counter += 1
         return self._nonce_counter
 
-    def _estimate_gas(self, func: object) -> int:
+    def _estimate_gas(self, func: Any) -> int:
         """Estimate gas for a contract function call, capped at _GAS_LIMIT_CAP.
         Falls back to a fixed budget if estimation reverts (e.g. a would-be
         rejected call) so we still broadcast and learn the real reason on-chain."""
@@ -223,7 +224,7 @@ class OnchainLogger:
         except Exception:
             return self.w3.to_wei(_GAS_PRICE_GWEI_FLOOR, "gwei")
 
-    def _send_transaction(self, build_fn: object, label: str) -> str:
+    def _send_transaction(self, build_fn: Any, label: str) -> str:
         """Build, sign, send and await a contract tx with safe gas/nonce.
 
         All onchain writes go through here so gas estimation, dynamic gas
