@@ -13,7 +13,12 @@ Invariants under test:
 - Two-step withdrawal: request (priced before burn) -> finalize -> expire.
 - Settlement-window-only redemption: finalize reverts while a funding-arb
   package is open.
-- Operator-attested NAV: attestTotalAssets is timelocked and agent-only.
+- Operator-attested NAV: attestTotalAssets is timelocked, agent-only, and
+  capped at a per-attestation delta (MAX_ATTESTATION_DELTA_BPS).
+- Two-step agent transfer: requestAgentTransfer (agent) -> executeAgentTransfer
+  (after 48h timelock). Per-tx cap at 10% of MAX_TVL.
+- Agent rotation: proposeAgent (owner) -> acceptAgent (proposed, after 72h).
+- Self-serve expire: the requesting user can expire their own request.
 """
 import ast
 import re
@@ -30,8 +35,11 @@ SOLC_VERSION = "0.8.29"
 _MIN_DEPOSIT = 100_000          # 0.1 USDT (6 decimals)
 _MAX_TVL = 10_000_000_000_000   # 10M USDT
 _ATTEST_TIMELOCK = 3600         # 1 hour
+_MAX_ATTESTATION_DELTA_BPS = 1000  # 10%
 _RATE_LIMIT = 3600                       # mirrors WITHDRAWAL_RATE_LIMIT
 _DEADLINE = 3 * 24 * 3600               # mirrors WITHDRAWAL_DEADLINE
+_AGENT_TRANSFER_TIMELOCK = 48 * 3600     # 48 hours
+_AGENT_ROTATION_TIMELOCK = 72 * 3600     # 72 hours
 
 MOCK_USDT_SRC = """
 // SPDX-License-Identifier: MIT
@@ -137,9 +145,11 @@ def vault_factory(w3, compiled):
     usdt = _deploy(w3, compiled["usdt_abi"], compiled["usdt_bin"])
     agent = w3.eth.accounts[1]
 
-    def factory(min_deposit=_MIN_DEPOSIT, max_tvl=_MAX_TVL, attest_timelock=_ATTEST_TIMELOCK):
+    def factory(min_deposit=_MIN_DEPOSIT, max_tvl=_MAX_TVL, attest_timelock=_ATTEST_TIMELOCK,
+                max_attestation_delta_bps=_MAX_ATTESTATION_DELTA_BPS):
         vault = _deploy(w3, compiled["vault_abi"], compiled["vault_bin"],
-                        usdt.address, agent, min_deposit, max_tvl, attest_timelock)
+                        usdt.address, agent, min_deposit, max_tvl, attest_timelock,
+                        max_attestation_delta_bps)
         return {
             "w3": w3,
             "usdt": usdt,
@@ -183,6 +193,18 @@ def _expect_revert(name, fn):
         f"expected {name} ({selector.hex()}), got {data.hex()} from: {str(ei.value)}"
 
 
+def _request_and_execute_transfer(env, amount):
+    """Request an agent transfer, travel past the timelock, and execute."""
+    req_id = env["vault"].functions.requestAgentTransfer(amount).call({"from": env["agent"]})
+    env["vault"].functions.requestAgentTransfer(amount).transact({"from": env["agent"]})
+    _travel(env["w3"], _AGENT_TRANSFER_TIMELOCK + 1)
+    env["vault"].functions.executeAgentTransfer(req_id).transact({"from": env["agent"]})
+    return req_id
+
+
+# ===== EXISTING TESTS (updated for hardening) =====
+
+
 def test_deposit_mints_shares_one_to_one(env):
     _seed(env, env["alice"], 1_000_000)
     assert env["vault"].functions.convertToShares(1_000_000).call() == 1_000_000
@@ -223,10 +245,12 @@ def test_share_price_rises_with_attested_nav(env):
     _seed(env, env["alice"], 1_000_000)
     _deposit(env, env["alice"], 1_000_000)
 
-    env["vault"].functions.attestTotalAssets(2_000_000).transact({"from": env["agent"]})
+    # 10% increase (within delta cap)
+    env["vault"].functions.attestTotalAssets(1_100_000).transact({"from": env["agent"]})
 
-    assert env["vault"].functions.totalAssets().call() == 2_000_000
-    assert env["vault"].functions.convertToAssets(1_000_000).call() == 1_500_000
+    assert env["vault"].functions.totalAssets().call() == 1_100_000
+    # 1M shares → 1_100_000 * 1M / 1M = 1_050_000 (with virtual offsets)
+    assert env["vault"].functions.convertToAssets(1_000_000).call() == 1_050_000
 
 
 def test_two_step_withdrawal_happy_path(env):
@@ -333,13 +357,13 @@ def test_attest_timelocked(env):
     _seed(env, env["alice"], 1_000_000)
     _deposit(env, env["alice"], 1_000_000)
 
-    env["vault"].functions.attestTotalAssets(2_000_000).transact({"from": env["agent"]})
+    env["vault"].functions.attestTotalAssets(1_050_000).transact({"from": env["agent"]})
     _expect_revert("AttestationTimelocked",
-                   lambda: env["vault"].functions.attestTotalAssets(3_000_000).transact({"from": env["agent"]}))
+                   lambda: env["vault"].functions.attestTotalAssets(1_100_000).transact({"from": env["agent"]}))
 
     _travel(env["w3"], _ATTEST_TIMELOCK + 1)
-    env["vault"].functions.attestTotalAssets(3_000_000).transact({"from": env["agent"]})
-    assert env["vault"].functions.totalAssets().call() == 3_000_000
+    env["vault"].functions.attestTotalAssets(1_100_000).transact({"from": env["agent"]})
+    assert env["vault"].functions.totalAssets().call() == 1_100_000
 
 
 def test_attest_capped_by_max_tvl(env):
@@ -354,20 +378,19 @@ def test_only_agent_can_attest_and_move(env):
     _deposit(env, env["alice"], 1_000_000)
 
     _expect_revert("OnlyAgent",
-                   lambda: env["vault"].functions.attestTotalAssets(2_000_000).transact({"from": env["alice"]}))
+                   lambda: env["vault"].functions.attestTotalAssets(1_100_000).transact({"from": env["alice"]}))
     _expect_revert("OnlyAgent",
                    lambda: env["vault"].functions.setFundingPackageOpen(True).transact({"from": env["alice"]}))
     _expect_revert("OnlyAgent",
-                   lambda: env["vault"].functions.transferToAgent(10_000).transact({"from": env["alice"]}))
+                   lambda: env["vault"].functions.requestAgentTransfer(10_000).transact({"from": env["alice"]}))
 
 
 def test_agent_transfers_reserve_without_changing_nav(env):
     _seed(env, env["alice"], 1_000_000)
     _deposit(env, env["alice"], 1_000_000)
 
-    env["vault"].functions.transferToAgent(400_000).transact({"from": env["agent"]})
+    _request_and_execute_transfer(env, 400_000)
 
-    # Money moved to the agent, NAV unchanged until the next attestation.
     assert env["usdt"].functions.balanceOf(env["agent"]).call() == 400_000
     assert env["vault"].functions.totalAssets().call() == 1_000_000
 
@@ -386,9 +409,16 @@ def test_transfer_to_agent_keeps_reserve_covered(env):
     env["vault"].functions.requestWithdraw(500_000).transact({"from": env["alice"]})
 
     # 500k is reserved for the pending request; the agent can move at most the rest.
+    req_over = env["vault"].functions.requestAgentTransfer(500_001).call({"from": env["agent"]})
+    env["vault"].functions.requestAgentTransfer(500_001).transact({"from": env["agent"]})
+    _travel(env["w3"], _AGENT_TRANSFER_TIMELOCK + 1)
     _expect_revert("ReservedExceedsBalance",
-                   lambda: env["vault"].functions.transferToAgent(500_001).transact({"from": env["agent"]}))
-    env["vault"].functions.transferToAgent(500_000).transact({"from": env["agent"]})
+                   lambda: env["vault"].functions.executeAgentTransfer(req_over).transact({"from": env["agent"]}))
+
+    req_ok = env["vault"].functions.requestAgentTransfer(500_000).call({"from": env["agent"]})
+    env["vault"].functions.requestAgentTransfer(500_000).transact({"from": env["agent"]})
+    _travel(env["w3"], _AGENT_TRANSFER_TIMELOCK + 1)
+    env["vault"].functions.executeAgentTransfer(req_ok).transact({"from": env["agent"]})
     assert env["usdt"].functions.balanceOf(env["agent"]).call() == 500_000
 
 
@@ -422,10 +452,9 @@ def test_expire_gates(env):
     req_id = env["vault"].functions.requestWithdraw(500_000).call({"from": env["alice"]})
     env["vault"].functions.requestWithdraw(500_000).transact({"from": env["alice"]})
 
-    # Only owner can expire.
-    _expect_revert("OnlyOwner",
+    # Too early to expire — self-serve or owner both revert.
+    _expect_revert("WithdrawalNotExpired",
                    lambda: env["vault"].functions.expireWithdrawal(req_id).transact({"from": env["alice"]}))
-    # Too early to expire.
     _expect_revert("WithdrawalNotExpired",
                    lambda: env["vault"].functions.expireWithdrawal(req_id).transact({"from": env["owner"]}))
 
@@ -448,3 +477,185 @@ def test_eth_not_accepted(env):
                        "to": env["vault"].address,
                        "value": 1,
                    }))
+
+
+# ===== NEW HARDENING TESTS =====
+
+
+def test_agent_transfer_happy_path(env):
+    _seed(env, env["alice"], 1_000_000)
+    _deposit(env, env["alice"], 1_000_000)
+
+    req_id = env["vault"].functions.requestAgentTransfer(400_000).call({"from": env["agent"]})
+    env["vault"].functions.requestAgentTransfer(400_000).transact({"from": env["agent"]})
+
+    # Too early to execute
+    _expect_revert("AgentTransferTimelocked",
+                   lambda: env["vault"].functions.executeAgentTransfer(req_id).transact({"from": env["agent"]}))
+
+    _travel(env["w3"], _AGENT_TRANSFER_TIMELOCK + 1)
+    env["vault"].functions.executeAgentTransfer(req_id).transact({"from": env["agent"]})
+    assert env["usdt"].functions.balanceOf(env["agent"]).call() == 400_000
+    assert env["vault"].functions.totalAssets().call() == 1_000_000
+
+
+def test_agent_transfer_cap_enforced(env):
+    _seed(env, env["alice"], 1_000_000)
+    _deposit(env, env["alice"], 1_000_000)
+
+    cap = env["vault"].functions.AGENT_TRANSFER_CAP().call()
+    assert cap == _MAX_TVL // 10
+    _expect_revert("AgentTransferExceedsCap",
+                   lambda: env["vault"].functions.requestAgentTransfer(cap + 1).transact({"from": env["agent"]}))
+
+
+def test_agent_transfer_cancel(env):
+    _seed(env, env["alice"], 1_000_000)
+    _deposit(env, env["alice"], 1_000_000)
+
+    req_id = env["vault"].functions.requestAgentTransfer(400_000).call({"from": env["agent"]})
+    env["vault"].functions.requestAgentTransfer(400_000).transact({"from": env["agent"]})
+
+    env["vault"].functions.cancelAgentTransfer(req_id).transact({"from": env["owner"]})
+
+    _travel(env["w3"], _AGENT_TRANSFER_TIMELOCK + 1)
+    _expect_revert("AgentTransferNotPending",
+                   lambda: env["vault"].functions.executeAgentTransfer(req_id).transact({"from": env["agent"]}))
+
+
+def test_only_agent_can_cancel_transfer(env):
+    _seed(env, env["alice"], 1_000_000)
+    _deposit(env, env["alice"], 1_000_000)
+
+    req_id = env["vault"].functions.requestAgentTransfer(400_000).call({"from": env["agent"]})
+    env["vault"].functions.requestAgentTransfer(400_000).transact({"from": env["agent"]})
+
+    # cancelAgentTransfer is onlyOwner, not onlyAgent
+    _expect_revert("OnlyOwner",
+                   lambda: env["vault"].functions.cancelAgentTransfer(req_id).transact({"from": env["mallory"]}))
+
+
+def test_attest_delta_cap_enforced(env):
+    _seed(env, env["alice"], 1_000_000)
+    _deposit(env, env["alice"], 1_000_000)
+
+    # totalAssetsPriced = 1M. 10% cap = 100k. Attest to 1.1M (exactly 10%).
+    env["vault"].functions.attestTotalAssets(1_100_000).transact({"from": env["agent"]})
+
+    _travel(env["w3"], _ATTEST_TIMELOCK + 1)
+
+    # From 1.1M, 10% = 110k. Max = 1.21M. Try 1.21M + 1.
+    _expect_revert("AttestationDeltaTooLarge",
+                   lambda: env["vault"].functions.attestTotalAssets(1_210_001).transact({"from": env["agent"]}))
+
+    # Exactly 10% is allowed.
+    env["vault"].functions.attestTotalAssets(1_210_000).transact({"from": env["agent"]})
+    assert env["vault"].functions.totalAssets().call() == 1_210_000
+
+
+def test_attest_delta_cap_allows_smaller_moves(env):
+    _seed(env, env["alice"], 1_000_000)
+    _deposit(env, env["alice"], 1_000_000)
+
+    env["vault"].functions.attestTotalAssets(1_050_000).transact({"from": env["agent"]})
+
+    _travel(env["w3"], _ATTEST_TIMELOCK + 1)
+
+    # 5% increase from 1.05M = +52.5k, well under 10% cap
+    env["vault"].functions.attestTotalAssets(1_102_500).transact({"from": env["agent"]})
+    assert env["vault"].functions.totalAssets().call() == 1_102_500
+
+
+def test_attest_delta_cap_allows_downward(env):
+    _seed(env, env["alice"], 1_000_000)
+    _deposit(env, env["alice"], 1_000_000)
+
+    env["vault"].functions.attestTotalAssets(1_100_000).transact({"from": env["agent"]})
+
+    _travel(env["w3"], _ATTEST_TIMELOCK + 1)
+
+    # Drop 10%: 1.1M → 990k (delta = 110k = 10% of 1.1M)
+    env["vault"].functions.attestTotalAssets(990_000).transact({"from": env["agent"]})
+    assert env["vault"].functions.totalAssets().call() == 990_000
+
+
+def test_expire_self_serve(env):
+    _seed(env, env["alice"], 1_000_000)
+    _deposit(env, env["alice"], 1_000_000)
+
+    req_id = env["vault"].functions.requestWithdraw(500_000).call({"from": env["alice"]})
+    env["vault"].functions.requestWithdraw(500_000).transact({"from": env["alice"]})
+
+    _travel(env["w3"], _DEADLINE + 1)
+
+    # Alice can expire her own request (self-serve).
+    env["vault"].functions.expireWithdrawal(req_id).transact({"from": env["alice"]})
+    assert env["vault"].functions.balanceOf(env["alice"]).call() == 1_000_000
+
+
+def test_expire_self_serve_wrong_user(env):
+    _seed(env, env["alice"], 1_000_000)
+    _deposit(env, env["alice"], 1_000_000)
+
+    req_id = env["vault"].functions.requestWithdraw(500_000).call({"from": env["alice"]})
+    env["vault"].functions.requestWithdraw(500_000).transact({"from": env["alice"]})
+
+    _travel(env["w3"], _DEADLINE + 1)
+
+    # Mallory (neither owner nor request owner) cannot expire.
+    _expect_revert("OnlyOwner",
+                   lambda: env["vault"].functions.expireWithdrawal(req_id).transact({"from": env["mallory"]}))
+
+
+def test_agent_rotation_happy_path(vault_factory):
+    env = vault_factory()
+    new_agent = env["w3"].eth.accounts[4]
+    env["vault"].functions.proposeAgent(new_agent).transact({"from": env["owner"]})
+
+    # Too early to accept
+    _expect_revert("RotationTimelocked",
+                   lambda: env["vault"].functions.acceptAgent().transact({"from": new_agent}))
+
+    _travel(env["w3"], _AGENT_ROTATION_TIMELOCK + 1)
+    env["vault"].functions.acceptAgent().transact({"from": new_agent})
+
+    # New agent can now call agent-only functions
+    _seed(env, env["alice"], 1_000_000)
+    _deposit(env, env["alice"], 1_000_000)
+    env["vault"].functions.attestTotalAssets(1_100_000).transact({"from": new_agent})
+    assert env["vault"].functions.totalAssets().call() == 1_100_000
+
+
+def test_agent_rotation_abort(env):
+    """Owner can abort a pending rotation; proposed agent can no longer accept."""
+    new_agent = env["w3"].eth.accounts[4]
+    env["vault"].functions.proposeAgent(new_agent).transact({"from": env["owner"]})
+    env["vault"].functions.abortAgentRotation().transact({"from": env["owner"]})
+
+    _travel(env["w3"], _AGENT_ROTATION_TIMELOCK + 1)
+    _expect_revert("NoAgentProposed",
+                   lambda: env["vault"].functions.acceptAgent().transact({"from": new_agent}))
+
+
+def test_only_owner_can_propose(env):
+    new_agent = env["w3"].eth.accounts[4]
+    _expect_revert("OnlyOwner",
+                   lambda: env["vault"].functions.proposeAgent(new_agent).transact({"from": env["alice"]}))
+
+
+def test_propose_zero_address_reverts(env):
+    _expect_revert("InvalidAgent",
+                   lambda: env["vault"].functions.proposeAgent(
+                       "0x0000000000000000000000000000000000000000"
+                   ).transact({"from": env["owner"]}))
+
+
+def test_only_proposed_agent_can_accept(env):
+    w3 = env["w3"]
+    new_agent = w3.eth.accounts[4]
+    someone_else = w3.eth.accounts[5]
+    env["vault"].functions.proposeAgent(new_agent).transact({"from": env["owner"]})
+
+    _travel(w3, _AGENT_ROTATION_TIMELOCK + 1)
+    _expect_revert("NotProposedAgent",
+                   lambda: env["vault"].functions.acceptAgent().transact({"from": someone_else}))

@@ -16,6 +16,7 @@ Prerequisites:
     VAULT_MIN_DEPOSIT=<asset minimal units, 6 dp for USDT>
     VAULT_MAX_TVL=<asset minimal units>
     VAULT_ATTEST_TIMELOCK=<seconds between NAV attestations>
+    VAULT_MAX_ATTESTATION_DELTA_BPS=<max NAV change per attest, bps, default 1000>
 
 Usage:
   python deploy.py                   # deploy TradeAuditTrail (default)
@@ -144,6 +145,7 @@ def deploy_trading_vault():
     min_deposit = os.getenv("VAULT_MIN_DEPOSIT")
     max_tvl = os.getenv("VAULT_MAX_TVL")
     attest_timelock = os.getenv("VAULT_ATTEST_TIMELOCK", "3600")
+    max_attestation_delta_bps = os.getenv("VAULT_MAX_ATTESTATION_DELTA_BPS", "1000")
 
     missing = [k for k, v in {"VAULT_ASSET_ADDRESS": asset,
                               "VAULT_AGENT_ADDRESS": agent_addr,
@@ -155,7 +157,8 @@ def deploy_trading_vault():
         sys.exit(1)
 
     address = _send(w3, account, contract,
-                    (asset, agent_addr, int(min_deposit), int(max_tvl), int(attest_timelock)),
+                    (asset, agent_addr, int(min_deposit), int(max_tvl),
+                     int(attest_timelock), int(max_attestation_delta_bps)),
                     "TradingVault")
 
     deployed = w3.eth.contract(address=address, abi=contract[0])
@@ -163,6 +166,7 @@ def deploy_trading_vault():
     print(f"  asset = {asset}")
     print(f"  agent = {agent_addr}")
     print(f"  MIN_DEPOSIT = {min_deposit}, MAX_TVL = {max_tvl}, ATTEST_TIMELOCK = {attest_timelock}")
+    print(f"  MAX_ATTESTATION_DELTA_BPS = {max_attestation_delta_bps}")
     return address
 
 

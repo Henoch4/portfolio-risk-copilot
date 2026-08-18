@@ -16,15 +16,25 @@ pragma solidity ^0.8.20;
  *    PrivateVault (private-vault-nox) is the proven pattern.
  * 2. Two-step withdrawals (request -> finalize -> expire), ported from
  *    PrivateVault. The price is taken BEFORE the burn so burning shares cannot
- *    inflate the share price and overpay this request.
- * 3. Settlement-window-only redemptions. finalizeWithdraw reverts while a
- *    funding-arb package is open (fundingPackageOpen). OKX perps settle
- *    funding every 8h, so the worst-case wait is one settlement window.
+ *    inflate the share price and overpay this request at the expense of remaining
+ *    shareholders.
+ * 3. Settlement-window-only redemptions: finalizeWithdraw reverts while a
+ *    funding-arb package is open (fundingPackageOpen). Forced close is out of
+ *    scope; settlement docs must be honest about worst-case (window open plus
+ *    one period) and the UI flags it.
  *
  * NAV is operator-attested: the agent EOA (onlyAgent) reports its real OKX
  * balance plus vault reserve through attestTotalAssets, with a deployer-set
- * timelock. This is the v1 reconciliation model (mechanism 1 in the design
- * doc) — the depositor UI labels it "value reported by the operator".
+ * timelock and a per-attestation delta cap (MAX_ATTESTATION_DELTA_BPS).
+ * This is the v1 reconciliation model (mechanism 1 in the design doc) — the
+ * depositor UI labels it "value reported by the operator".
+ *
+ * Agent controls:
+ * - Two-step transfer: requestAgentTransfer (agent) -> executeAgentTransfer
+ *   (after 48h timelock). Per-tx cap at 10% of MAX_TVL.
+ * - Agent rotation: proposeAgent (owner) -> acceptAgent (proposed, after 72h).
+ * - expireWithdrawal is self-serve: the requesting user can expire their own
+ *   request after the deadline (previously owner-only).
  */
 contract TradingVault {
     /* ========== ERC20 SHARE STATE ========== */
@@ -40,7 +50,7 @@ contract TradingVault {
     /* ========== VAULT STATE ========== */
 
     address public immutable owner;
-    address public immutable agent;
+    address public agent;
     IERC20 public immutable asset;
     uint8 public immutable assetDecimals;
 
@@ -50,27 +60,37 @@ contract TradingVault {
     uint256 public immutable MAX_TVL;
     /// @notice Minimum time between operator NAV attestations.
     uint256 public immutable ATTEST_TIMELOCK;
+    /// @notice Per-transfer cap: 10% of MAX_TVL (set in constructor).
+    uint256 public immutable AGENT_TRANSFER_CAP;
+    /// @notice Timelock for executing an agent transfer request.
+    uint256 public immutable AGENT_TRANSFER_TIMELOCK;
+    /// @notice Timelock for agent rotation acceptance.
+    uint256 public immutable AGENT_ROTATION_TIMELOCK;
+    /// @notice Max NAV change per attestation in basis points (1000 = 10%).
+    uint256 public immutable MAX_ATTESTATION_DELTA_BPS;
 
     uint256 private constant WITHDRAWAL_DEADLINE = 3 days;
     uint256 private constant WITHDRAWAL_RATE_LIMIT = 1 hours;
-    uint256 private constant _VIRTUAL_ASSETS = 1e6; // asset minimal units (1 USDT)
-    uint256 private constant _VIRTUAL_SHARES = 1e6; // share units
+    uint256 private constant _VIRTUAL_ASSETS = 1e6;
+    uint256 private constant _VIRTUAL_SHARES = 1e6;
     uint256 private constant _SHARE_PRICE_PRECISION = 1e18;
+    uint256 private constant _BPS_DENOMINATOR = 10_000;
 
     struct WithdrawalRequest {
-        uint256 shares;  // shares burned at request time
-        uint256 usdtOut; // reserved asset minimal units, priced at request time
+        uint256 shares;
+        uint256 usdtOut;
         address owner;
         uint256 deadline;
         bool finalized;
     }
 
-    /// @notice Operator-attested NAV in asset minimal units (vault reserve + OKX balance).
+    struct AgentTransferRequest {
+        uint256 amount;
+        uint256 requestedAt;
+        bool pending;
+    }
+
     uint256 public totalAssetsPriced;
-    /// @notice Asset minimal units reserved for outstanding withdrawal requests.
-    /// @dev Excluded from share-pricing so a request in flight (shares burned,
-    ///      value still in the pool) cannot inflate convertToShares/convertToAssets
-    ///      for subsequent deposits or requests.
     uint256 public pendingReserved;
     uint256 public withdrawalCount;
     uint256 public lastAttestation;
@@ -80,6 +100,11 @@ contract TradingVault {
     mapping(address => uint256) public lastWithdrawalRequest;
     mapping(uint256 => WithdrawalRequest) public withdrawalRequests;
 
+    address public proposedAgent;
+    uint256 public agentProposedAt;
+    uint256 public agentTransferCount;
+    mapping(uint256 => AgentTransferRequest) public agentTransferRequests;
+
     /* ========== EVENTS ========== */
 
     event Deposit(address indexed account, uint256 amount, uint256 shares);
@@ -88,7 +113,12 @@ contract TradingVault {
     event WithdrawalExpired(uint256 indexed requestId, address indexed account);
     event NavAttested(uint256 totalAssets, uint256 timestamp);
     event FundingPackageOpenChanged(bool open, uint256 timestamp);
-    event AgentWithdrawal(uint256 amount);
+    event AgentTransferRequested(uint256 indexed requestId, uint256 amount);
+    event AgentTransferExecuted(uint256 indexed requestId, uint256 amount);
+    event AgentTransferCancelled(uint256 indexed requestId);
+    event AgentProposed(address indexed newAgent, uint256 proposedAt);
+    event AgentRotated(address indexed newAgent, uint256 rotatedAt);
+    event AgentRotationAborted(address indexed formerAgent);
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 
@@ -100,6 +130,7 @@ contract TradingVault {
     error DepositTooSmall();
     error MaxTvlExceeded();
     error InvalidAmount();
+    error InvalidAgent();
     error AlreadyFinalized();
     error NotWithdrawalOwner();
     error WithdrawalDeadlinePassed();
@@ -112,6 +143,13 @@ contract TradingVault {
     error AttestationTimelocked();
     error ReservedExceedsNav();
     error ReservedExceedsBalance();
+    error AgentTransferExceedsCap();
+    error AgentTransferNotPending();
+    error AgentTransferTimelocked();
+    error NoAgentProposed();
+    error NotProposedAgent();
+    error RotationTimelocked();
+    error AttestationDeltaTooLarge();
 
     /* ========== MODIFIERS ========== */
 
@@ -137,7 +175,8 @@ contract TradingVault {
         address _agent,
         uint256 _minDeposit,
         uint256 _maxTvl,
-        uint256 _attestTimelock
+        uint256 _attestTimelock,
+        uint256 _maxAttestationDeltaBps
     ) {
         owner = msg.sender;
         agent = _agent;
@@ -146,6 +185,10 @@ contract TradingVault {
         MIN_DEPOSIT = _minDeposit;
         MAX_TVL = _maxTvl;
         ATTEST_TIMELOCK = _attestTimelock;
+        AGENT_TRANSFER_CAP = _maxTvl / 10;
+        AGENT_TRANSFER_TIMELOCK = 48 hours;
+        AGENT_ROTATION_TIMELOCK = 72 hours;
+        MAX_ATTESTATION_DELTA_BPS = _maxAttestationDeltaBps;
     }
 
     receive() external payable {
@@ -192,47 +235,35 @@ contract TradingVault {
 
     /* ========== VIEWS ========== */
 
-    /// @notice Pool value available to live shares (attested NAV minus assets
-    ///         already reserved for pending withdrawal requests).
     function _netAssets() internal view returns (uint256) {
         return totalAssetsPriced - pendingReserved;
     }
 
-    /// @notice Total pool value in asset minimal units (operator-attested).
     function totalAssets() public view returns (uint256) {
         return totalAssetsPriced;
     }
 
-    /// @notice Share price in asset minimal units, 18-decimal scaled.
-    /// @dev Includes the virtual offset so the first deposit starts at ~1:1.
-    ///      Quotes against net assets (pending reserves excluded) so a pending
-    ///      request cannot inflate the price for new deposits.
     function sharePriceAsset() public view returns (uint256) {
         uint256 supply = totalSupply + _VIRTUAL_SHARES;
         return (_netAssets() + _VIRTUAL_ASSETS) * _SHARE_PRICE_PRECISION / supply;
     }
 
-    /// @notice ERC-4626 style conversion: asset amount -> share amount.
     function convertToShares(uint256 assets) public view returns (uint256) {
         uint256 supply = totalSupply + _VIRTUAL_SHARES;
         return assets * supply / (_netAssets() + _VIRTUAL_ASSETS);
     }
 
-    /// @notice ERC-4626 style conversion: share amount -> asset amount.
     function convertToAssets(uint256 shares) public view returns (uint256) {
         uint256 supply = totalSupply + _VIRTUAL_SHARES;
         return shares * (_netAssets() + _VIRTUAL_ASSETS) / supply;
     }
 
-    /// @notice Settlement window is open when no funding-arb package is running.
     function settlementOpen() public view returns (bool) {
         return !fundingPackageOpen;
     }
 
     /* ========== DEPOSITS ========== */
 
-    /// @notice Deposit USDT and mint shares at the current NAV.
-    /// @dev MIN_DEPOSIT and MAX_TVL are enforced here, at execution, not stored inertly.
     function deposit(uint256 amount) external nonReentrant returns (uint256 shares) {
         if (amount < MIN_DEPOSIT) revert DepositTooSmall();
         if (totalAssetsPriced + amount > MAX_TVL) revert MaxTvlExceeded();
@@ -250,9 +281,6 @@ contract TradingVault {
 
     /* ========== TWO-STEP WITHDRAWALS ========== */
 
-    /// @notice Step 1: burn shares and open a withdrawal request.
-    /// @dev Priced BEFORE the burn so burning cannot inflate the share price
-    ///      and overpay this request at the expense of remaining shareholders.
     function requestWithdraw(uint256 shares) external nonReentrant returns (uint256 requestId) {
         if (shares == 0) revert InvalidAmount();
         if (shares > balanceOf[msg.sender]) revert InvalidAmount();
@@ -277,9 +305,6 @@ contract TradingVault {
         emit WithdrawalRequested(requestId, msg.sender, shares);
     }
 
-    /// @notice Step 2: finalize a request and receive the reserved USDT.
-    /// @dev Only between funding-arb packages (settlement-window model (b)).
-    ///      Reverts while a package is open — the depositor waits one window.
     function finalizeWithdraw(uint256 requestId) external nonReentrant {
         WithdrawalRequest storage req = withdrawalRequests[requestId];
         if (req.finalized) revert AlreadyFinalized();
@@ -296,15 +321,16 @@ contract TradingVault {
         emit WithdrawalFinalized(requestId, req.owner, req.usdtOut);
     }
 
-    /// @notice Owner-only: reclaim a stale request after its deadline, re-minting shares.
-    /// @dev Guarantees a request can never brick-pay a depositor: if the agent
-    ///      never opens a settlement window before the deadline, the shares are
-    ///      restored instead of silently lost.
-    function expireWithdrawal(uint256 requestId) external nonReentrant onlyOwner {
+    /// @notice Reclaim a stale request after its deadline, re-minting shares.
+    /// @dev Owner or requesting user can expire. Guarantees a request can never
+    ///      brick: if the agent never opens a settlement window before the
+    ///      deadline, the shares are restored instead of silently lost.
+    function expireWithdrawal(uint256 requestId) external nonReentrant {
         WithdrawalRequest storage req = withdrawalRequests[requestId];
         if (req.finalized) revert AlreadyFinalized();
         if (block.timestamp < req.deadline) revert WithdrawalNotExpired();
         if (req.owner == address(0)) revert NothingToExpire();
+        if (msg.sender != owner && msg.sender != req.owner) revert OnlyOwner();
 
         req.finalized = true;
         pendingReserved -= req.usdtOut;
@@ -316,11 +342,21 @@ contract TradingVault {
     /* ========== OPERATOR ATTESTATION (reconciliation, mechanism 1) ========== */
 
     /// @notice Agent reports the pool's real value (OKX balance + vault reserve).
-    /// @dev Timelocked; capped at MAX_TVL. This is the v1 reconciliation model.
+    /// @dev Timelocked; capped at MAX_TVL and at MAX_ATTESTATION_DELTA_BPS
+    ///      change per attestation. This is the v1 reconciliation model.
     function attestTotalAssets(uint256 newTotalAssets) external onlyAgent {
         if (newTotalAssets > MAX_TVL) revert MaxTvlExceeded();
         if (newTotalAssets < pendingReserved) revert ReservedExceedsNav();
         if (block.timestamp < lastAttestation + ATTEST_TIMELOCK) revert AttestationTimelocked();
+
+        if (totalAssetsPriced > 0) {
+            uint256 prior = totalAssetsPriced;
+            uint256 delta = newTotalAssets > prior
+                ? newTotalAssets - prior
+                : prior - newTotalAssets;
+            uint256 maxDelta = prior * MAX_ATTESTATION_DELTA_BPS / _BPS_DENOMINATOR;
+            if (delta > maxDelta) revert AttestationDeltaTooLarge();
+        }
 
         lastAttestation = block.timestamp;
         totalAssetsPriced = newTotalAssets;
@@ -328,24 +364,78 @@ contract TradingVault {
         emit NavAttested(newTotalAssets, block.timestamp);
     }
 
-    /// @notice Agent marks a funding-arb package open/closed. While open,
-    ///         finalizeWithdraw reverts (settlement-window-only redemption).
+    /// @notice Agent marks a funding-arb package open/closed.
     function setFundingPackageOpen(bool open) external onlyAgent {
         fundingPackageOpen = open;
         emit FundingPackageOpenChanged(open, block.timestamp);
     }
 
-    /// @notice Agent moves reserve USDT to its OKX funding address.
-    /// @dev The money stays in the pool (deployed on OKX); NAV is unchanged and
-    ///      reconciled later via attestTotalAssets. Agent is the only mover.
-    function transferToAgent(uint256 amount) external onlyAgent {
+    /* ========== AGENT TRANSFER (two-step, timelocked) ========== */
+
+    /// @notice Step 1: agent requests a capital transfer (periodic provisioning).
+    /// @dev Per-tx cap at 10% of MAX_TVL. Requires a 48h timelock before execution.
+    function requestAgentTransfer(uint256 amount) external onlyAgent nonReentrant returns (uint256 requestId) {
         if (amount == 0) revert InvalidAmount();
-        // The vault's physical USDT must keep covering every pending request
-        // after the agent moves money out; otherwise withdrawals would stall
-        // until their 3-day expiry re-mints shares.
-        if (asset.balanceOf(address(this)) < amount + pendingReserved) revert ReservedExceedsBalance();
-        if (!asset.transfer(agent, amount)) revert TransferFailed();
-        emit AgentWithdrawal(amount);
+        if (amount > AGENT_TRANSFER_CAP) revert AgentTransferExceedsCap();
+        agentTransferCount += 1;
+        requestId = agentTransferCount;
+        agentTransferRequests[requestId] = AgentTransferRequest({
+            amount: amount,
+            requestedAt: block.timestamp,
+            pending: true
+        });
+        emit AgentTransferRequested(requestId, amount);
+    }
+
+    /// @notice Step 2: execute a pending transfer after the timelock elapses.
+    function executeAgentTransfer(uint256 requestId) external onlyAgent nonReentrant {
+        AgentTransferRequest storage req = agentTransferRequests[requestId];
+        if (!req.pending) revert AgentTransferNotPending();
+        if (block.timestamp < req.requestedAt + AGENT_TRANSFER_TIMELOCK) revert AgentTransferTimelocked();
+        if (asset.balanceOf(address(this)) < req.amount + pendingReserved) revert ReservedExceedsBalance();
+
+        req.pending = false;
+        if (!asset.transfer(agent, req.amount)) revert TransferFailed();
+        emit AgentTransferExecuted(requestId, req.amount);
+    }
+
+    /// @notice Owner cancels a pending agent transfer request.
+    function cancelAgentTransfer(uint256 requestId) external onlyOwner nonReentrant {
+        AgentTransferRequest storage req = agentTransferRequests[requestId];
+        if (!req.pending) revert AgentTransferNotPending();
+        req.pending = false;
+        emit AgentTransferCancelled(requestId);
+    }
+
+    /* ========== AGENT ROTATION ========== */
+
+    /// @notice Owner proposes a new agent address. Must wait AGENT_ROTATION_TIMELOCK
+    ///         before the proposed agent can accept.
+    function proposeAgent(address newAgent) external onlyOwner {
+        if (newAgent == address(0)) revert InvalidAgent();
+        proposedAgent = newAgent;
+        agentProposedAt = block.timestamp;
+        emit AgentProposed(newAgent, block.timestamp);
+    }
+
+    /// @notice Proposed agent accepts the role after the timelock.
+    function acceptAgent() external nonReentrant {
+        if (proposedAgent == address(0)) revert NoAgentProposed();
+        if (msg.sender != proposedAgent) revert NotProposedAgent();
+        if (block.timestamp < agentProposedAt + AGENT_ROTATION_TIMELOCK) revert RotationTimelocked();
+
+        agent = proposedAgent;
+        delete proposedAgent;
+        agentProposedAt = 0;
+        emit AgentRotated(msg.sender, block.timestamp);
+    }
+
+    /// @notice Owner aborts a pending agent rotation proposal.
+    function abortAgentRotation() external onlyOwner {
+        if (proposedAgent == address(0)) revert NoAgentProposed();
+        emit AgentRotationAborted(proposedAgent);
+        delete proposedAgent;
+        agentProposedAt = 0;
     }
 }
 
