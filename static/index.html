@@ -387,6 +387,11 @@
           </tbody>
         </table>
       </div>
+
+      <div class="card">
+        <h2 class="card-title">Reconciliation <span class="badge badge-neutral" style="margin-left:0.4rem; vertical-align: middle;">Phase 3</span></h2>
+        <div id="reconBody" class="empty-state">Loading...</div>
+      </div>
     </aside>
   </div>
 
@@ -795,6 +800,70 @@
       }
     }
 
+    async function loadReconciliation() {
+      try {
+        const res = await fetch('/api/v1/vault/reconciliation');
+        if (!res.ok) return;
+        const data = await res.json();
+        const body = document.getElementById('reconBody');
+        if (!body) return;
+
+        if (!data.vault_deployed) {
+          body.className = 'empty-state';
+          body.innerHTML = 'Vault not deployed.<br>Reconciliation shows vault totalAssets vs OKX balance.';
+          return;
+        }
+
+        body.className = '';
+        const fmtUsdt = (v) => v != null ? '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '--';
+        const fmtPct = (v) => v != null ? (v >= 0 ? '+' : '') + v.toFixed(2) + '%' : '--';
+
+        let html = '<table class="table"><thead><tr><th>Metric</th><th class="num">Value</th></tr></thead><tbody>';
+        html += '<tr><td>Vault totalAssets</td><td class="num">' + fmtUsdt(data.vault_total_assets != null ? data.vault_total_assets / 1e6 : null) + '</td></tr>';
+        html += '<tr><td>OKX USDT balance</td><td class="num">' + fmtUsdt(data.okx_balance_usdt) + '</td></tr>';
+        html += '<tr><td>OKX total equity</td><td class="num">' + fmtUsdt(data.okx_equity_usdt) + '</td></tr>';
+        html += '<tr><td>Pending reserved</td><td class="num">' + (data.pending_reserved != null ? '$' + (data.pending_reserved / 1e6).toFixed(2) : '--') + '</td></tr>';
+
+        const discColor = (data.discrepancy_pct != null && data.discrepancy_pct < 0) ? 'var(--danger)' : 'var(--success)';
+        html += '<tr><td>Discrepancy</td><td class="num" style="color:' + discColor + ';">' + fmtPct(data.discrepancy_pct) + '</td></tr>';
+
+        html += '<tr><td>Suggested attestation</td><td class="num">' + (data.suggested_attestation != null ? '$' + (data.suggested_attestation / 1e6).toLocaleString(undefined, { maximumFractionDigits: 2 }) : '--') + '</td></tr>';
+        html += '<tr><td>Last attestation</td><td class="num">' + (data.last_attestation ? new Date(data.last_attestation * 1000).toLocaleDateString() : 'Never') + '</td></tr>';
+        html += '</tbody></table>';
+
+        html += '<div style="margin-top:0.7rem; display:flex; gap:0.5rem;">';
+        html += '<button class="run-btn" style="font-size:0.78rem; padding:0.45rem 0.8rem;" onclick="triggerAttest()">Attest NAV</button>';
+        html += '</div>';
+        html += '<div class="schedule-note" style="margin-top:0.5rem;">Operator-attested value. Clearly labeled to depositors as \"value reported by the operator.\"</div>';
+        html += '<div id="attestStatus" class="halt-notice" style="margin-top:0.5rem;"></div>';
+
+        body.innerHTML = html;
+      } catch (err) {
+        const body = document.getElementById('reconBody');
+        if (body) { body.className = 'empty-state'; body.innerHTML = 'Reconciliation unavailable'; }
+      }
+    }
+
+    async function triggerAttest() {
+      const statusEl = document.getElementById('attestStatus');
+      if (statusEl) { statusEl.className = 'halt-notice show'; statusEl.textContent = 'Sending attestation transaction...'; }
+      try {
+        const res = await fetch('/api/v1/vault/attest', {
+          method: 'POST',
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
+        });
+        const data = await res.json();
+        if (res.ok && data.tx_hash) {
+          if (statusEl) statusEl.textContent = 'Attestation sent. Tx: ' + data.tx_hash.slice(0, 10) + '...';
+          setTimeout(loadReconciliation, 3000);
+        } else {
+          if (statusEl) statusEl.textContent = 'Attest failed: ' + (data.detail || 'unknown error');
+        }
+      } catch (e) {
+        if (statusEl) statusEl.textContent = 'Attest failed: ' + e.message;
+      }
+    }
+
     function renderRegime(stats) {
       const body = document.getElementById('regimeBody');
       const entries = Object.entries(stats.regime || {});
@@ -820,6 +889,7 @@
       loadStats();
       loadPositions();
       loadFundingArb();
+      loadReconciliation();
     }
 
     let toastTimer = null;
