@@ -103,7 +103,7 @@ python scripts/smoke_test_trading.py
 
 ## X Layer Deployment
 
-**Network**: X Layer Testnet (chainId: 195)
+**Network**: X Layer Testnet (chainId: 1952)
 **RPC**: `https://testnet-rpc.xlayer.tech`
 **Native USDC**: Now available (replaces USDC.Bridged)
 
@@ -132,7 +132,7 @@ Portfolio-risk-copilot/
 │   ├── contracts/TradeAuditTrail.sol     # Audit trail smart contract
 │   ├── artifacts/TradeAuditTrail_abi.json # Compiled ABI
 │   ├── scripts/deploy.js                 # Deployment script
-│   └── hardhat.config.mjs                # Hardhat config
+│   └── hardhat.config.js                # Hardhat config
 ├── src/
 │   ├── main.py          # FastAPI: /trade, /hire, /audit-stats, /risk-stats, /kill-switch endpoints
 │   ├── agent.py         # Multi-agent orchestrator

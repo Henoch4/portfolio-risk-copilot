@@ -38,3 +38,6 @@ htmlcov/
 
 # Artifacts (kept in repo but gitignore the heavy bytecode)
 contracts/artifacts/*.txt
+
+# Local append-only audit log (runtime artifact)
+audit_log.jsonl

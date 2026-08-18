@@ -36,14 +36,31 @@ def test_readme_reports_1952():
     assert "chainId: 1952" in readme, "README must report the deployed chain id (1952)"
 
 
+def test_hardhat_config_deploys_to_1952():
+    hardhat = (REPO / "contracts" / "hardhat.config.js").read_text(encoding="utf-8")
+    assert "chainId: 1952," in hardhat, (
+        "hardhat.config.js xltestnet network must use chainId 1952 to match the RPC"
+    )
+
+
+def test_submission_doc_reports_1952():
+    sub = (REPO / "HACKATHON_SUBMISSION.md").read_text(encoding="utf-8")
+    assert "chainId: 1952" in sub, (
+        "HACKATHON_SUBMISSION.md must report the deployed chain id (1952)"
+    )
+
+
 def test_no_stale_195_chain_id_literal():
     # 195 (without the trailing 2) must not appear as a chain id anywhere.
     for path in [
         REPO / "src" / "audit_logger.py",
         REPO / "src" / "main.py",
         REPO / "contracts" / "scripts" / "deploy.py",
+        REPO / "contracts" / "hardhat.config.js",
         REPO / "README.md",
+        REPO / "HACKATHON_SUBMISSION.md",
     ]:
         text = path.read_text(encoding="utf-8")
         assert "chain_id: int = 195," not in text
         assert "chainId: 195)" not in text
+        assert "chainId: 195," not in text

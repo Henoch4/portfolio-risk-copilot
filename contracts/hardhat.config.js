@@ -9,7 +9,7 @@ module.exports = {
   networks: {
     xltestnet: {
       url: "https://testnet-rpc.xlayer.tech",
-      chainId: 195,
+      chainId: 1952,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
       gasPrice: 1000000000,
     },

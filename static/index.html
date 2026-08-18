@@ -193,6 +193,19 @@
 
     .controls-row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
     .controls-row .run-btn { margin-left: auto; }
+    .token-row { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.75rem; }
+    .token-input {
+      flex: 1; min-width: 220px; max-width: 340px; padding: 0.45rem 0.7rem; background: var(--surface-2);
+      border: 1px solid var(--border); border-radius: var(--radius-btn); color: var(--text-primary);
+      font-size: 0.82rem; font-family: inherit;
+    }
+    .token-input:focus { border-color: var(--success); outline: none; }
+    .token-save {
+      padding: 0.45rem 0.9rem; border: 1px solid var(--border); background: var(--surface-2);
+      color: var(--text-secondary); border-radius: var(--radius-btn); font-size: 0.72rem; cursor: pointer;
+    }
+    .token-save:hover { border-color: var(--success); color: var(--success); }
+    .token-status { font-size: 0.72rem; color: var(--text-secondary); margin-left: 0.25rem; }
     button.run-btn {
       padding: 0.6rem 1.4rem; min-height: 44px; background: var(--text-primary); color: var(--ink);
       border: none; border-radius: var(--radius-btn); font-size: 0.85rem; font-weight: 700;
@@ -316,6 +329,11 @@
           <button class="run-btn" id="runBtn" onclick="runCycle()">Run Trading Cycle</button>
           <span class="dot ok" id="liveDot" title="Connecting…"></span>
         </div>
+        <div class="token-row">
+          <input id="agentToken" class="token-input" type="password" placeholder="Agent API token (live mode)" autocomplete="off" aria-label="Agent API token" spellcheck="false" />
+          <button class="token-save" type="button" onclick="saveAgentToken()">Save</button>
+          <span class="token-status" id="tokenStatus"></span>
+        </div>
         <div class="schedule-note">Serverless: each run is one cycle. Schedule POST /trade repeats (e.g. a Vercel Cron Job) for continuous trading.</div>
         <div class="halt-notice" id="haltNotice">Trading is halted. Resume from the status strip above to run a cycle.</div>
         <div class="help-text">Dry-run: no real trades are placed and nothing is sent on-chain. <span id="liveWarn" style="color: var(--danger); display: none;">Live mode executes real orders on mainnet.</span></div>
@@ -383,6 +401,28 @@
     let dailyLossLimit = 500;
     let cycling = false;
 
+    let agentToken = '';
+    function loadAgentToken() {
+      try { agentToken = localStorage.getItem('agentToken') || ''; } catch (e) { agentToken = ''; }
+      const el = document.getElementById('agentToken');
+      if (el) el.value = agentToken;
+    }
+    function saveAgentToken() {
+      const el = document.getElementById('agentToken');
+      agentToken = (el.value || '').trim();
+      try { localStorage.setItem('agentToken', agentToken); } catch (e) { }
+      const status = document.getElementById('tokenStatus');
+      if (status) {
+        status.textContent = agentToken ? 'Token saved (sent on live requests).' : 'No token set. Live mode will fail requested endpoints.';
+        setTimeout(() => { if (status) status.textContent = ''; }, 3500);
+      }
+    }
+    function authHeaders(extra) {
+      const h = Object.assign({}, extra || {});
+      if (agentToken) h['X-Agent-Token'] = agentToken;
+      return h;
+    }
+
     function updateGauge() {
       const pct = dailyLossLimit > 0 ? Math.min(100, (dailyLoss / dailyLossLimit) * 100) : 0;
       const fill = document.getElementById('gaugeFill');
@@ -430,7 +470,7 @@
 
       if (halted) {
         try {
-          const res = await fetch('/kill-switch/deactivate', { method: 'POST' });
+          const res = await fetch('/kill-switch/deactivate', { method: 'POST', headers: authHeaders({}) });
           const data = await res.json();
           if (!res.ok) throw new Error(data.detail || data.error || 'Failed to deactivate kill switch');
           await loadStats();
@@ -455,14 +495,14 @@
       try {
         const res = await fetch('/kill-switch/activate', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({ reason: reason }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || data.error || 'Failed to activate kill switch');
         await loadStats();
       } catch (err) {
-        showError('Kill switch error: ' + err.message);
+        showError('Kill switch error: ' + err.message + (err.message.indexOf('X-Agent-Token') !== -1 ? ' — save the agent token above and try again.' : ''));
       }
     }
 
@@ -521,7 +561,7 @@
       try {
         const res = await fetch('/trade', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({ assets: assets, mode: 'single', interval_seconds: 300 }),
         });
         const data = await res.json();
@@ -529,7 +569,7 @@
         renderCycleResult(data);
         refreshDashboard();
       } catch (err) {
-        showError('Network error: ' + err.message);
+        showError('Network error: ' + err.message + (err.message.indexOf('X-Agent-Token') !== -1 ? ' — save the agent token above and try again.' : ''));
       } finally {
         cycling = false;
         btn.disabled = false;
@@ -836,6 +876,7 @@
 
     updateGauge();
     updateModeIndicator();
+    loadAgentToken();
     refreshDashboard();
     connectLive();
   </script>

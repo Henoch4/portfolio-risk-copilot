@@ -54,7 +54,7 @@ drives the curator):
   integrity block, confidence-floor skip, and risk-gate rejection, complementing
   the on-chain decision log. Surface: `GET /api/v1/curator-profile`.
 
-Tests: `python -m pytest tests/ -q` — 176 tests, fully offline.
+Tests: `python -m pytest tests/ -q` — 258 tests, fully offline.
 
 ## Files
 
@@ -177,6 +177,13 @@ curl -X POST http://localhost:8000/hire \
 | max_leverage | 5.0x | Max leverage allowed |
 | min_confidence_bps | 7000 (70%) | Min signal confidence |
 | allowed_assets | BTC, ETH, SOL, BNB | Asset allowlist |
+
+> **Note on daily counters**: `RiskGate`'s daily-loss and daily-trade counters are
+> in-memory (`src/execution.py`, `_daily_loss` / `_daily_trade_count`), so a
+> process restart resets today's accumulated loss/trade counts. Fine for dry-run
+> and demo use; for real capital, persist them (Redis/DB) so limits survive
+> restarts. The contract-level limits on `TradeAuditTrail.sol` are onchain and do
+> survive restarts, but the off-chain counters in the Python gate are not.
 
 ## Smart Contract: TradeAuditTrail.sol
 
