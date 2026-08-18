@@ -49,6 +49,9 @@ class DecisionPayload:
     risk_params_hash: str
     timestamp: int
     is_short: bool = False
+    # Id shared by every leg of an atomic multi-leg package. A single-leg
+    # (non-package) decision leaves it None, which hashes to bytes32(0).
+    package_id: str | None = None
 
 
 # Compiled ABI from TradeAuditTrail.sol (via-ir)
@@ -71,6 +74,7 @@ _ABI = [
                 "type": "tuple",
                 "components": [
                     {"name": "decisionId", "type": "bytes32"},
+                    {"name": "packageId", "type": "bytes32"},
                     {"name": "asset", "type": "string"},
                     {"name": "signal", "type": "string"},
                     {"name": "strategy", "type": "string"},
@@ -132,6 +136,7 @@ _ABI = [
         "anonymous": False,
         "inputs": [
             {"indexed": True, "name": "decisionId", "type": "bytes32"},
+            {"indexed": True, "name": "packageId", "type": "bytes32"},
             {"indexed": True, "name": "agent", "type": "address"},
             {"name": "asset", "type": "string"},
             {"name": "signal", "type": "string"},
@@ -285,7 +290,8 @@ class OnchainLogger:
     def _compute_payload_hash(self, payload: DecisionPayload) -> bytes:
         """Compute the keccak256 hash of the decision payload (what the agent signs).
 
-        The contract computes: keccak256(abi.encodePacked(decisionId, agent, asset, ...))
+        The contract computes: keccak256(abi.encodePacked(decisionId, packageId,
+        agent, asset, signal, strategy, confidence, entryPrice, sizeUsd, riskHash))
         The agent signs this hash with personal_sign (EIP-191), which prepends
         "\x19Ethereum Signed Message:\n32" + hash.
         """
@@ -294,11 +300,19 @@ class OnchainLogger:
             payload.risk_params_hash[2:] if payload.risk_params_hash.startswith("0x")
             else payload.risk_params_hash
         )
+        # A single-leg decision has no package: hash as bytes32(0), matching
+        # what the agent submits to logDecision for a non-package trade.
+        package_id_hash = (
+            Web.keccak(text=payload.package_id)
+            if payload.package_id
+            else b"\x00" * 32
+        )
 
         # abi.encodePacked equivalent in web3
         # We need to pack the values the same way Solidity does
         packed = (
             decision_id_hash
+            + package_id_hash
             + bytes.fromhex(payload.agent_address[2:])
             + payload.asset.encode("utf-8")
             + payload.signal.encode("utf-8")
@@ -343,10 +357,16 @@ class OnchainLogger:
         )
         signature = self._sign_payload(payload)
         decision_id_hash = Web.keccak(text=payload.decision_id)
+        package_id_hash = (
+            Web.keccak(text=payload.package_id)
+            if payload.package_id
+            else b"\x00" * 32
+        )
 
         # Build struct for logDecision
         decision_input = {
             "decisionId": decision_id_hash,
+            "packageId": package_id_hash,
             "asset": payload.asset,
             "signal": payload.signal,
             "strategy": payload.strategy,

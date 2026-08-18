@@ -42,6 +42,7 @@ from .okx_cli import OkxCli, OkxCliConfig, OkxCliError
 from .audit_trail import AuditLog
 from .curator import CuratorAgent, apply_env_overrides
 from .data_integrity import DataIntegrityGate, IntegrityResult, MarketTick, Severity
+from .multi_leg import MultiLegExecutionManager, Step, LiveFillSimulator, PackageState
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,8 @@ class AutonomousTradingAgent:
         curator: CuratorAgent | None = None,
         audit_log: AuditLog | None = None,
         expected_equity: float | None = None,
+        multi_leg_manager: MultiLegExecutionManager | None = None,
+        funding_arb_min_rate: float = 0.001,
     ):
         self.cli = okx_cli
         self.risk_gate = risk_gate
@@ -101,6 +104,15 @@ class AutonomousTradingAgent:
         # Off by default — see _generate_signals docstring. Momentum is a
         # phase-2+ strategy per the design doc's Section 0 MVP scope.
         self.enable_momentum = enable_momentum
+
+        # The delta-neutral funding-arbitrage package machinery. When a
+        # manager is wired, an asset whose funding rate clears
+        # `funding_arb_min_rate` (default 0.001 = 0.1%) runs the long-spot /
+        # short-perp package path INSTEAD of the directional signal path for
+        # that cycle. None disables the feature — every test that doesn't
+        # wire a manager keeps the existing directional behavior.
+        self.multi_leg_manager = multi_leg_manager
+        self.funding_arb_min_rate = funding_arb_min_rate
 
         # Pre-signal integrity gate (runs BEFORE signal generation), curator
         # profile selector, and the local append-only audit log. All optional
@@ -384,6 +396,281 @@ class AutonomousTradingAgent:
             confidence_bps=signal.confidence_bps,
         )
 
+    def _funding_arb_opportunity(self, asset: str, market_data: dict) -> bool:
+        """Is this asset a candidate for a delta-neutral funding-arb package?
+
+        Positive funding only: the package is long-spot / short-perp, which
+        COLLECTS funding when longs pay shorts. The mirror (negative funding,
+        short spot is not expressible) is out of scope — see the summary in
+        the module docstring. Requires a wired manager with capacity and no
+        already-open package on the same asset.
+        """
+        if self.multi_leg_manager is None:
+            return False
+        funding_rate = float(market_data.get("funding_rate", 0.0))
+        if funding_rate < self.funding_arb_min_rate:
+            return False
+        allowed, reason = self.multi_leg_manager.can_open(asset)
+        if not allowed:
+            logger.info(f"Funding arb for {asset} skipped: {reason}")
+            return False
+        return True
+
+    async def _run_funding_arb_package(
+        self, asset: str, md: dict, cycle_id: str, out: dict
+    ) -> dict:
+        """Build, risk-gate, log and execute one delta-neutral funding-arb
+        package for an asset. Mutates and returns `out` so the caller can
+        return it directly (one trade per asset per cycle).
+
+        Package: buy spot (BTC-USDT) + short perp (BTC-USDT-SWAP), 50/50.
+        Both legs are risk-gated BEFORE the package is proposed; both legs
+        are logged onchain with the SAME package_id BEFORE dispatch (the
+        onchain log is the hard gate). Dispatch then runs through the shared
+        OrderExecutor via LiveFillSimulator — the same fill verification,
+        slippage collar and freshness gate the directional path uses, so the
+        package can't outrun the risk controls by taking a second order path.
+        """
+        manager = self.multi_leg_manager
+        if manager is None:
+            out["errors"].append(
+                f"Funding arb for {asset}: no MultiLegExecutionManager wired"
+            )
+            return out
+
+        spot_inst = asset.replace("-SWAP", "")
+        if spot_inst == asset:
+            msg = f"Funding arb for {asset}: no spot pair (not a -SWAP perp)"
+            out["errors"].append(msg)
+            return out
+
+        funding_rate = float(md.get("funding_rate", 0.0))
+        perp_prices = self._extract_prices(md)
+        perp_price = perp_prices[-1] if perp_prices else None
+
+        # Spot leg needs its own reference price + timestamp for the risk
+        # gate's freshness check (check 9) and post-fill verification — the
+        # perp snapshot does not contain the spot instrument's data.
+        try:
+            spot_md = await self._fetch_market_data(spot_inst)
+        except OkxCliError as e:
+            out["errors"].append(f"Funding arb for {asset}: spot data fetch failed: {e}")
+            return out
+        spot_prices = self._extract_prices(spot_md)
+        spot_price = spot_prices[-1] if spot_prices else None
+        spot_timestamp = float(spot_md.get("timestamp", md.get("timestamp", 0)))
+        perp_timestamp = float(md.get("timestamp", 0))
+
+        if spot_price is None or perp_price is None:
+            msg = f"Funding arb for {asset}: no spot ({spot_price}) or perp ({perp_price}) price"
+            out["errors"].append(msg)
+            return out
+
+        # Confidence from funding extremity — same mapping as the directional
+        # funding_rate_signal (0.1% -> 70%, 0.3%+ -> 90% cap), so package size
+        # grows with the size of the payment being harvested.
+        confidence = min(0.60 + abs(funding_rate) * 100, 0.90)
+        confidence_bps = int(confidence * 10000)
+        arb_signal = Signal(
+            strategy="funding_arbitrage",
+            asset=asset,
+            direction="NEUTRAL",
+            confidence_bps=confidence_bps,
+            entry_price=perp_price,
+        )
+        notional = self._compute_order_size(arb_signal)
+        if notional <= 0:
+            out["errors"].append(
+                f"Funding arb for {asset}: funding {funding_rate:.4f} "
+                f"gives no positive Kelly edge"
+            )
+            return out
+
+        leg_notional = notional / 2.0
+        # Step collar is a fraction (0.003 = 0.3%); the gate's collar is a
+        # percentage. Convert so both legs carry the same cap in like units.
+        step_collar = min(self.risk_gate.max_slippage_pct / 100.0, 0.05)
+        steps = [
+            Step(venue="okx", action="short_perp", asset=asset,
+                 amount_ratio=0.5, max_slippage_pct=step_collar),
+            Step(venue="okx", action="buy_spot", asset=spot_inst,
+                 amount_ratio=0.5, max_slippage_pct=step_collar),
+        ]
+
+        # Risk-gate BOTH legs before the package is proposed — the whole
+        # planned trade, not each leg independently. Same agent, same
+        # per-asset reference price/timestamp.
+        perp_order = OrderRequest(
+            inst_id=asset, side="sell", order_type="market",
+            size=f"{leg_notional:.2f}", reduce_only=False,
+            confidence_bps=confidence_bps,
+        )
+        spot_order = OrderRequest(
+            inst_id=spot_inst, side="buy", order_type="market",
+            size=f"{leg_notional:.2f}", reduce_only=False,
+            confidence_bps=confidence_bps,
+        )
+        checks = [
+            self.risk_gate.check_order(
+                perp_order, self.agent_id,
+                current_price=perp_price,
+                current_price_timestamp=perp_timestamp,
+                current_position_side=(md.get("position") or {}).get("side"),
+            ),
+            self.risk_gate.check_order(
+                spot_order, self.agent_id,
+                current_price=spot_price,
+                current_price_timestamp=spot_timestamp,
+            ),
+        ]
+        for check in checks:
+            if not check.approved:
+                out["errors"].append(f"Funding arb for {asset}: risk gate rejected: {check.reason}")
+                logger.warning(f"Funding arb risk gate rejected {asset}: {check.code}: {check.reason}")
+                return out
+
+        try:
+            pkg = manager.propose_package(steps, notional)
+        except (ValueError, RuntimeError) as e:
+            out["errors"].append(f"Funding arb for {asset}: package rejected: {e}")
+            return out
+
+        package_id = f"pkg_{uuid.uuid4().hex[:10]}"
+        leg_payloads = [
+            DecisionPayload(
+                decision_id=f"dec_{uuid.uuid4().hex[:12]}",
+                agent_address=self.onchain_logger.agent_address if self.onchain_logger else "0x" + "00" * 20,
+                asset=asset,
+                signal="SHORT",
+                strategy="funding_arbitrage",
+                confidence_bps=confidence_bps,
+                entry_price=perp_price,
+                size_usd=leg_notional,
+                risk_params_hash=self.risk_gate.compute_risk_hash() if hasattr(self.risk_gate, 'compute_risk_hash') else "0x" + "00" * 32,
+                timestamp=int(time.time()),
+                is_short=True,
+                package_id=package_id,
+            ),
+            DecisionPayload(
+                decision_id=f"dec_{uuid.uuid4().hex[:12]}",
+                agent_address=self.onchain_logger.agent_address if self.onchain_logger else "0x" + "00" * 20,
+                asset=spot_inst,
+                signal="LONG",
+                strategy="funding_arbitrage",
+                confidence_bps=confidence_bps,
+                entry_price=spot_price,
+                size_usd=leg_notional,
+                risk_params_hash=self.risk_gate.compute_risk_hash() if hasattr(self.risk_gate, 'compute_risk_hash') else "0x" + "00" * 32,
+                timestamp=int(time.time()),
+                is_short=False,
+                package_id=package_id,
+            ),
+        ]
+
+        # Phase 4 (package): log BOTH legs onchain before any order is placed.
+        # If either log fails the whole package is blocked — a half-logged
+        # package would break the on-chain linkage the package_id provides.
+        log_txs: list[str | None] = [None, None]
+        for i, payload in enumerate(leg_payloads):
+            if self.onchain_logger and not self.dry_run:
+                try:
+                    log_txs[i] = await asyncio.to_thread(
+                        self.onchain_logger.log_decision, payload
+                    )
+                except Exception as e:
+                    out["errors"].append(f"Funding arb for {asset}: onchain log failed: {e}")
+                    logger.error(f"Funding arb onchain logging failed: {e}")
+                    return out
+            out["decisions"].append({
+                "decision_id": payload.decision_id,
+                "package_id": package_id,
+                "asset": payload.asset,
+                "tx_hash": log_txs[i],
+                "signal": payload.signal,
+                "confidence_bps": payload.confidence_bps,
+                "confidence": payload.confidence_bps / 10000.0,
+                "side": perp_order.side if i == 0 else spot_order.side,
+                "size_usd": leg_notional,
+                "risk_hash": payload.risk_params_hash,
+                "status": "approved",
+                "dry_run": self.dry_run or self.onchain_logger is None,
+            })
+
+        # Phase 5 (package): dispatch both legs through the shared executor,
+        # then resolve. Both dispatch and resolve run real orders (or the
+        # dry-run simulation) inside LiveFillSimulator's asyncio.run, which
+        # can't run inside this event loop — run them in a worker thread.
+        fill_sim = LiveFillSimulator(
+            self.executor,
+            reference_prices={
+                asset: perp_price,
+                spot_inst: spot_price,
+            },
+            reference_timestamps={
+                asset: perp_timestamp,
+                spot_inst: spot_timestamp,
+            },
+        )
+
+        def _dispatch_and_resolve():
+            manager.dispatch_concurrent(pkg, fill_sim)
+            return manager.resolve(pkg, fill_sim)
+
+        await asyncio.to_thread(_dispatch_and_resolve)
+
+        if pkg.state == PackageState.LOCKED:
+            await asyncio.to_thread(manager.settle, pkg)
+            leg_fill_prices = {
+                r.step.asset: r.fill_price for r in pkg.leg_results if r.filled
+            }
+            for i, payload in enumerate(leg_payloads):
+                fill_price = leg_fill_prices.get(payload.asset)
+                out["executions"].append({
+                    "decision_id": payload.decision_id,
+                    "package_id": package_id,
+                    "asset": payload.asset,
+                    "order_id": f"pkg_{pkg.id}",
+                    "state": "filled",
+                    "fill_px": fill_price,
+                    "fill_price": fill_price,
+                    "slippage_pct": None,
+                    "size_usd": leg_notional,
+                    "tx_hash": log_txs[i],
+                    "status": "success",
+                    "fee": "0",
+                    "fee_ccy": "USDT",
+                })
+                if log_txs[i] and self.onchain_logger:
+                    await asyncio.to_thread(
+                        self.onchain_logger.record_execution,
+                        decision_id=payload.decision_id,
+                        fill_price=float(fill_price or 0),
+                        fill_size_usd=leg_notional,
+                        fee_usd=0,
+                        success=True,
+                    )
+                async with self._risk_lock:
+                    self.risk_gate.report_volume(self.agent_id, leg_notional)
+            logger.info(f"Funding arb package {pkg.id} LOCKED and settled for {asset}")
+        else:
+            out["errors"].append(
+                f"Funding arb for {asset}: package {pkg.id} ended {pkg.state.value} "
+                f"(unwound={pkg.unwound})"
+            )
+
+        if self.audit_log:
+            async with self._audit_lock:
+                self.audit_log.write("funding_arb_package", {
+                    "cycle_id": cycle_id,
+                    "asset": asset,
+                    "package_id": package_id,
+                    "package_state": pkg.state.value,
+                    "notional_usd": notional,
+                    "funding_rate": funding_rate,
+                    "slippage_breached": pkg.slippage_breached,
+                })
+        return out
+
     async def run_trading_cycle(self, assets: list[str]) -> TradingCycleResult:
         """
         Run a complete trading cycle:
@@ -473,6 +760,15 @@ class AutonomousTradingAgent:
             return out
 
         # --- Phase 2: Signal Generation ---
+        # The delta-neutral funding-arb package takes priority over the
+        # directional signal path: a perp whose funding rate clears
+        # `funding_arb_min_rate` runs the long-spot/short-perp package
+        # INSTEAD of a directional bet this cycle (one trade per asset per
+        # cycle). Directional signals still fire only when no arb package is
+        # available for the asset.
+        if self._funding_arb_opportunity(asset, md):
+            return await self._run_funding_arb_package(asset, md, cycle_id, out)
+
         signals = self._generate_signals(asset, md)
         ensemble = ensemble_signal(asset, signals)
 

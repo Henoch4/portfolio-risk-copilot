@@ -157,3 +157,109 @@ class TestSignatureRoundtrip:
 
         assert recovered_address.lower() == logger.account.address.lower()
         assert recovered_address.lower() != other_account.address.lower()
+
+    def _package_payload(self, logger, decision_id, asset, package_id):
+        return DecisionPayload(
+            decision_id=decision_id,
+            agent_address=logger.account.address,
+            asset=asset,
+            signal="NEUTRAL",
+            strategy="funding_arbitrage",
+            confidence_bps=7000,
+            entry_price=100.0,
+            size_usd=5000.0,
+            risk_params_hash="0x" + "55" * 32,
+            timestamp=1700000003,
+            package_id=package_id,
+        )
+
+    def test_both_package_legs_share_package_id_and_verify(self):
+        """Regression: the funding-arb package logs two legs (spot buy +
+        perp short) with the SAME package_id. Each leg is signed separately,
+        and each signature must recover the agent — proving the contract
+        receives a bytes32 packageId that links the legs without breaking
+        per-leg signature verification."""
+        logger = _make_test_logger()
+        package_id = "pkg-abc-001"
+
+        spot_leg = self._package_payload(
+            logger, "pkg-decision-spot-001", "BTC-USDT", package_id
+        )
+        perp_leg = self._package_payload(
+            logger, "pkg-decision-perp-001", "BTC-USDT-SWAP", package_id
+        )
+
+        for leg in (spot_leg, perp_leg):
+            payload_hash = logger._compute_payload_hash(leg)
+            signature = logger._sign_payload(leg)
+            recovered = _contract_side_recover(payload_hash, signature)
+            assert recovered.lower() == logger.account.address.lower()
+
+        # Legs differ by decision_id/asset, so their hashes differ — but the
+        # shared package_id is what a relayer can't unlink (covered below).
+        assert logger._compute_payload_hash(spot_leg) != logger._compute_payload_hash(perp_leg)
+
+    def test_tampered_package_id_fails_verification(self):
+        """A signature for the real package_id must not verify against a
+        payload whose package_id was swapped after signing."""
+        logger = _make_test_logger()
+        original = self._package_payload(
+            logger, "pkg-decision-perp-002", "BTC-USDT-SWAP", "pkg-abc-002"
+        )
+        signature = logger._sign_payload(original)
+
+        tampered = self._package_payload(
+            logger, "pkg-decision-perp-002", "BTC-USDT-SWAP", "pkg-evil-999"
+        )
+        tampered_hash = logger._compute_payload_hash(tampered)
+
+        recovered_address = _contract_side_recover(tampered_hash, signature)
+        assert recovered_address.lower() != logger.account.address.lower(), (
+            "Swapping a leg's package_id after signing must invalidate the "
+            "signature, or a relayer could unlink a leg from its package."
+        )
+
+    def test_single_leg_payload_hashes_zero_package_id(self):
+        """A single-leg (non-package) decision keeps packageId bytes32(0)
+        in the hash layout — the ABI/layout regression pin so the Python
+        hash can never drift from the contract's abi.encodePacked order
+        (decisionId, packageId, agent, asset, signal, strategy, confidence,
+        entryPrice, sizeUsd, riskHash)."""
+        logger = _make_test_logger()
+        payload = DecisionPayload(
+            decision_id="test-decision-single-001",
+            agent_address=logger.account.address,
+            asset="ETH-USDT-SWAP",
+            signal="LONG",
+            strategy="mean_reversion",
+            confidence_bps=8500,
+            entry_price=3000.0,
+            size_usd=1000.0,
+            risk_params_hash="0x" + "66" * 32,
+            timestamp=1700000004,
+        )
+        assert payload.package_id is None
+
+        # Decision id and package id both hash to bytes32 and are packed in
+        # that order — assert the layout matches the contract field order by
+        # building the reference hash independently (no logger helper).
+        decision_id_hash = Web3.keccak(text=payload.decision_id)
+        package_id_hash = b"\x00" * 32
+        reference = Web3.keccak(
+            decision_id_hash
+            + package_id_hash
+            + bytes.fromhex(payload.agent_address[2:])
+            + payload.asset.encode("utf-8")
+            + payload.signal.encode("utf-8")
+            + payload.strategy.encode("utf-8")
+            + payload.confidence_bps.to_bytes(32, "big", signed=True)
+            + int(payload.entry_price * 1e8).to_bytes(32, "big")
+            + int(payload.size_usd * 1e8).to_bytes(32, "big")
+            + bytes.fromhex(payload.risk_params_hash[2:])
+        )
+
+        assert logger._compute_payload_hash(payload) == reference, (
+            "Python hash layout drifted from TradeAuditTrail.sol's "
+            "abi.encodePacked order — every logDecision() would revert "
+            "with 'invalid signature' on-chain."
+        )

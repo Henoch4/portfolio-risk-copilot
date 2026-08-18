@@ -7,6 +7,7 @@ Run locally (after completing README.md setup):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -48,6 +49,7 @@ from .execution import RiskGate
 from .agent import AutonomousTradingAgent
 from .audit_logger import OnchainLogger
 from .validation import validation_report
+from .multi_leg import MultiLegExecutionManager
 from .audit_trail import AuditLog
 from .curator import CuratorAgent
 from .data_integrity import DataIntegrityGate
@@ -90,6 +92,10 @@ class _CycleWebSocketHub:
 
 
 _ws_hub = _CycleWebSocketHub()
+
+# --- Funding-rate cache (dashboard polls; funding moves slowly) ---
+_FUNDING_CACHE: dict = {"ts": 0.0, "data": None}
+_FUNDING_TTL = 60.0
 
 # --- Rate limiting ---
 _rate_limit_store: dict[str, list[float]] = defaultdict(list)
@@ -279,6 +285,9 @@ _curator = _make_curator()
 _integrity_gate = DataIntegrityGate(
     staleness_threshold_s=float(os.getenv("DATA_STALENESS_SECONDS", "30")),
 )
+_multi_leg_manager = MultiLegExecutionManager(
+    max_concurrent_packages=int(os.getenv("MAX_CONCURRENT_PACKAGES", "3")),
+)
 _trading_agent = AutonomousTradingAgent(
     okx_cli=_cli,
     risk_gate=_risk_gate,
@@ -291,6 +300,8 @@ _trading_agent = AutonomousTradingAgent(
     integrity_gate=_integrity_gate,
     curator=_curator,
     audit_log=_audit_log,
+    multi_leg_manager=_multi_leg_manager,
+    funding_arb_min_rate=float(os.getenv("FUNDING_ARB_MIN_RATE", "0.001")),
 )
 
 
@@ -395,6 +406,11 @@ async def audit_stats(days: int = 7):
 async def risk_stats():
     """Get current daily risk statistics for the agent."""
     stats = _risk_gate.get_daily_stats(_trading_agent.agent_id)
+    # Include per-asset regime status if throttle is enabled
+    regime_data = {}
+    if _risk_gate.regime_throttle:
+        for asset in _ALLOWED_ASSETS:
+            regime_data[asset] = _risk_gate.regime_status(asset)
     return {
         "daily_loss_usd": stats["loss"],
         "daily_pnl_usd": -stats["loss"],
@@ -407,6 +423,82 @@ async def risk_stats():
         "min_confidence_bps": _risk_gate.min_confidence_bps,
         "kill_switch": _risk_gate.kill_switch_status(),
         "dry_run": _dry_run,
+        "regime": regime_data,
+    }
+
+
+@app.get("/positions")
+async def positions():
+    """Fetch live positions from OKX. Returns per-asset position data
+    including side, size, entry price, unrealized P&L, and leverage."""
+    try:
+        raw = await _cli.positions(inst_type="SWAP")
+        if isinstance(raw, dict) and "data" in raw:
+            raw = raw["data"]
+        if not isinstance(raw, list):
+            raw = []
+        result = []
+        for p in raw:
+            inst_id = p.get("instId", "")
+            pos_amt = float(p.get("pos", 0) or 0)
+            if pos_amt == 0:
+                continue
+            avg_px = float(p.get("avgPx", 0) or 0)
+            upl = float(p.get("upl", 0) or 0)
+            lever = float(p.get("lever", 1) or 1)
+            side = "long" if pos_amt > 0 else "short"
+            notional = abs(pos_amt) * avg_px if avg_px else 0
+            result.append({
+                "inst_id": inst_id,
+                "asset": inst_id.replace("-SWAP", ""),
+                "side": side,
+                "size": abs(pos_amt),
+                "avg_price": avg_px,
+                "unrealized_pnl": upl,
+                "leverage": lever,
+                "notional_usd": notional,
+            })
+        return {"positions": result}
+    except Exception as e:
+        return {"positions": [], "error": str(e)}
+
+
+@app.get("/funding-arb-status")
+async def funding_arb_status():
+    """Return current funding rates and arb package status for all assets.
+    Funding rates are fetched live from the market (cached for 60s) and
+    package state comes from the multi-leg manager's open-package tracking."""
+    packages = []
+    if _multi_leg_manager:
+        for pkg in _multi_leg_manager._open_packages.values():
+            packages.append({
+                "id": pkg.id,
+                "asset": pkg.steps[0].asset if pkg.steps else None,
+                "state": pkg.state.value,
+                "notional": pkg.notional,
+                "slippage_breached": pkg.slippage_breached,
+                "leg_count": len(pkg.steps),
+            })
+
+    now = time.time()
+    if _FUNDING_CACHE["data"] is None or (now - _FUNDING_CACHE["ts"]) > _FUNDING_TTL:
+        async def _funding_rate(inst_id: str) -> tuple[str, float | None]:
+            try:
+                funding = await _cli.run("market", "funding-rate", "--instId", inst_id, use_global_flags=False)
+                raw = funding.get("data", [{}])[0].get("fundingRate", None)
+                return inst_id, (float(raw) if raw is not None else None)
+            except Exception:
+                return inst_id, None
+
+        fetched = await asyncio.gather(*(_funding_rate(a) for a in _ALLOWED_ASSETS))
+        _FUNDING_CACHE["data"] = {asset.replace("-SWAP", ""): rate for asset, rate in fetched}
+        _FUNDING_CACHE["ts"] = now
+
+    return {
+        "funding_rates": _FUNDING_CACHE["data"],
+        "min_rate": _trading_agent.funding_arb_min_rate,
+        "open_packages": packages,
+        "max_concurrent": _multi_leg_manager.max_concurrent_packages if _multi_leg_manager else 0,
     }
 
 

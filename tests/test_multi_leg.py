@@ -194,6 +194,93 @@ def test_propose_raises_on_invalid_steps():
         mgr.propose_package([two_leg_steps()[0]], notional=10_000)
 
 
+def test_resolve_routes_slippage_breach_before_fill_state():
+    """Regression: `resolve()` must route on slippage_breached BEFORE fill
+    state. A package whose legs all filled but one breached its slippage
+    collar must unwind fail-closed — the old partial-fill-first ordering
+    would treat 'all legs filled' as a clean LOCKED trade and leave the
+    breached leg's exposure in place."""
+    mgr = MultiLegExecutionManager()
+    pkg = mgr.propose_package(two_leg_steps(), notional=10_000)
+
+    def breach_on_second_leg(step, notional):
+        breached = step.venue == "venue_b"
+        return LegResult(
+            step=step,
+            filled=True,
+            fill_price=notional,
+            slippage_pct=0.05 if breached else 0.001,
+        )
+
+    pkg = mgr.dispatch_concurrent(pkg, breach_on_second_leg)
+    assert pkg.slippage_breached is True
+    assert all(r.filled for r in pkg.leg_results)  # all filled, still breached
+
+    unwind_calls = []
+
+    def unwind_sim(step, notional):
+        unwind_calls.append((step.action, notional))
+        return LegResult(step=step, filled=True, fill_price=notional, slippage_pct=0.001)
+
+    pkg = mgr.resolve(pkg, unwind_sim)
+    assert pkg.state == PackageState.ABORTED
+    assert pkg.unwound is True
+    assert {a for a, _ in unwind_calls} == {"cover_perp", "sell_spot"}
+    assert mgr.open_package_count() == 0
+
+
+def test_resolve_routes_partial_fill_when_no_slippage_breach():
+    """A package that is partially filled but not slippage-breached routes to
+    the partial-fill path (only the filled leg unwinds)."""
+    mgr = MultiLegExecutionManager()
+    pkg = mgr.propose_package(two_leg_steps(), notional=10_000)
+
+    call_count = {"n": 0}
+
+    def one_fills_one_doesnt(step, notional):
+        call_count["n"] += 1
+        filled = call_count["n"] == 1
+        return LegResult(
+            step=step, filled=filled,
+            fill_price=notional if filled else None,
+            slippage_pct=0.001 if filled else None,
+        )
+
+    pkg = mgr.dispatch_concurrent(pkg, one_fills_one_doesnt)
+    assert pkg.slippage_breached is False
+
+    unwind_calls = []
+
+    def unwind_sim(step, notional):
+        unwind_calls.append((step.action, notional))
+        return LegResult(step=step, filled=True, fill_price=notional, slippage_pct=0.001)
+
+    pkg = mgr.resolve(pkg, unwind_sim)
+    assert pkg.state == PackageState.ABORTED
+    assert len(unwind_calls) == 1  # only the filled leg
+    assert mgr.open_package_count() == 0
+
+
+def test_resolve_leaves_locked_package_untouched():
+    """resolve() on an already-LOCKED package (all filled, no breach) is a
+    no-op — the routing must not re-enter a resolver or unwind anything."""
+    mgr = MultiLegExecutionManager()
+    pkg = mgr.propose_package(two_leg_steps(), notional=10_000)
+    pkg = mgr.dispatch_concurrent(pkg, always_fill)
+    assert pkg.state == PackageState.LOCKED
+
+    called = []
+
+    def unwind_sim(step, notional):
+        called.append(step)
+        return LegResult(step=step, filled=True, fill_price=notional, slippage_pct=0.001)
+
+    resolved = mgr.resolve(pkg, unwind_sim)
+    assert resolved is pkg
+    assert resolved.state == PackageState.LOCKED
+    assert called == []
+
+
 def test_close_package_uses_symmetric_inverse():
     mgr = MultiLegExecutionManager()
     pkg = mgr.propose_package(two_leg_steps(), notional=10_000)

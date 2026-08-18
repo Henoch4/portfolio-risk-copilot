@@ -368,6 +368,17 @@ class RiskGate:
         self.regime_band_pct = regime_band_pct
         self.regime_size_scale = regime_size_scale
         self.regime_buffer = regime_buffer
+
+        # Derived allowlist: the swap perps an operator lists in
+        # `allowed_assets` authorize the SAME base asset in any instrument
+        # form — so a `BTC-USDT-SWAP` allowlist entry also authorizes the
+        # `BTC-USDT` spot leg of a delta-neutral funding-arb package. This is
+        # a deliberate widening (base-asset authorization), not an accident:
+        # without it the spot leg of a package would be rejected as
+        # ASSET_NOT_ALLOWED before the arb could ever be proposed. Derived
+        # here once so the risk hash below reflects the real, effective
+        # allowlist rather than the literal perp list.
+        self._base_allowed: set[str] = {a.split("-")[0] for a in self.allowed_assets}
         
         # Daily tracking (in production, this would be persisted in Redis/DB)
         self._daily_volume: dict[str, float] = {}
@@ -470,6 +481,21 @@ class RiskGate:
             }
         return {"enabled": self.regime_throttle, "band_pct": self.regime_band_pct}
 
+    def _is_asset_allowed(self, inst_id: str) -> bool:
+        """Authorize an instrument by exact allowlist match OR by base asset.
+
+        The allowlist is expressed in swap-perp form (`BTC-USDT-SWAP`), but a
+        delta-neutral funding-arb package trades a spot leg (`BTC-USDT`) for
+        the same base asset. Both are the same directional risk on the same
+        base; rejecting the spot leg would make the hedged package
+        unbuildable while the naked swap passes. Base-asset authorization
+        widens exactly to the same base — no more.
+        """
+        if inst_id in self.allowed_assets:
+            return True
+        base = inst_id.split("-")[0] if inst_id else ""
+        return base in self._base_allowed
+
     def check_order(
         self,
         order: OrderRequest,
@@ -500,8 +526,10 @@ class RiskGate:
                 reason=f"Kill switch is active: {self._kill_switch_reason}",
             )
 
-        # 1. Asset allowlist
-        if order.inst_id not in self.allowed_assets:
+        # 1. Asset allowlist — exact match OR same base asset (the spot leg
+        #    of a funding-arb package, e.g. BTC-USDT when BTC-USDT-SWAP is
+        #    allowed).
+        if not self._is_asset_allowed(order.inst_id):
             return RiskCheckResult(
                 approved=False,
                 code="ASSET_NOT_ALLOWED",
@@ -717,6 +745,7 @@ class RiskGate:
             "min_confidence_bps": self.min_confidence_bps,
             "max_price_age_seconds": self.max_price_age_seconds,
             "allowed_assets": sorted(self.allowed_assets),
+            "base_allowed": sorted(self._base_allowed),
             "regime_throttle": self.regime_throttle,
             "regime_band_pct": self.regime_band_pct,
             "regime_size_scale": self.regime_size_scale,

@@ -15,6 +15,7 @@ pragma solidity ^0.8.30;
 contract TradeAuditTrail {
     struct TradeDecision {
         bytes32 decisionId;
+        bytes32 packageId;
         address agent;
         string asset;
         string signal;
@@ -49,6 +50,7 @@ contract TradeAuditTrail {
     // Packed struct for logDecision calldata to avoid stack-too-deep
     struct DecisionInput {
         bytes32 decisionId;
+        bytes32 packageId;
         string asset;
         string signal;
         string strategy;
@@ -77,6 +79,7 @@ contract TradeAuditTrail {
 
     event DecisionLogged(
         bytes32 indexed decisionId,
+        bytes32 indexed packageId,
         address indexed agent,
         string asset,
         string signal,
@@ -172,6 +175,7 @@ contract TradeAuditTrail {
 
         bytes32 payloadHash = keccak256(abi.encodePacked(
             decisionId,
+            input.packageId,
             msg.sender,
             input.asset,
             input.signal,
@@ -225,6 +229,7 @@ contract TradeAuditTrail {
 
         decisions.push(TradeDecision({
             decisionId: decisionId,
+            packageId: input.packageId,
             agent: msg.sender,
             asset: input.asset,
             signal: input.signal,
@@ -241,6 +246,7 @@ contract TradeAuditTrail {
 
         emit DecisionLogged(
             decisionId,
+            input.packageId,
             msg.sender,
             input.asset,
             input.signal,

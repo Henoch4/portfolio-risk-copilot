@@ -14,7 +14,10 @@ filled at 3x its allowed slippage still counted as a clean fill. Here
 ``dispatch_concurrent`` flags any leg whose realized slippage breaches its
 limit and forces the package down the unwind path instead of LOCKED.
 
-Fills are simulated (paper trading) -- no real venue connection.
+Fills are simulated (paper trading) by default via ``PaperFillSimulator``;
+``LiveFillSimulator`` places real orders through the repo's ``OrderExecutor``
+for live mode, satisfying the same (step, notional) -> LegResult contract so
+the enforcement code is identical for both.
 """
 from __future__ import annotations
 
@@ -22,6 +25,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 import itertools
 import random
+import uuid
+
+from .execution import OrderRequest, OrderStatus, OrderSide
 
 
 class PackageState(Enum):
@@ -168,6 +174,26 @@ class MultiLegExecutionManager:
         self._release(pkg)
         return pkg
 
+    def resolve(self, pkg: Package, unwind_simulator) -> Package:
+        """
+        Route a PENDING_FILL package to the correct resolver — the caller
+        never has to pick. Order matters and is deliberately fixed here:
+        `slippage_breached` is checked BEFORE fill state.
+
+        A package can be flagged `slippage_breached` while its legs are also
+        not all filled. The slippage path unwinds every filled leg (including
+        cleanly-filled peers, fail-closed); the partial-fill path unwinds only
+        the filled leg(s). Checking fill state first would send a breached
+        package down the partial-fill path — and worse, when all legs happen
+        to be filled, the partial-fill resolver's "no unfilled legs -> LOCKED"
+        branch would mark a breached package as a clean locked trade.
+        """
+        if pkg.slippage_breached:
+            return self.resolve_slippage_breach(pkg, unwind_simulator)
+        if not all(r.filled for r in pkg.leg_results):
+            return self.resolve_partial_fill(pkg, unwind_simulator)
+        return pkg
+
     def resolve_slippage_breach(self, pkg: Package, unwind_simulator) -> Package:
         """
         At least one leg filled beyond its allowed slippage. The package is
@@ -236,3 +262,99 @@ class PaperFillSimulator:
             return LegResult(step=step, filled=False, fill_price=None, slippage_pct=None)
         slippage = abs(self.rng.gauss(0, step.max_slippage_pct / 2))
         return LegResult(step=step, filled=True, fill_price=notional, slippage_pct=slippage)
+
+
+class LiveFillSimulator:
+    """Places real orders through the repo's OrderExecutor and reports the
+    actual fill, not a simulation.
+
+    Satisfies the exact same call contract as PaperFillSimulator
+    (``(step, notional) -> LegResult``) so ``dispatch_concurrent`` and the
+    resolvers need no branch on paper-vs-live -- the executor is reused
+    (risk-gated, dry-run-aware, fill-verified) rather than this class
+    inventing a second order path.
+
+    Slippage is measured by the executor's post-fill verification
+    (``OrderResult.slippage_pct``, a percentage) and normalized to the same
+    fraction unit ``Step.max_slippage_pct`` and PaperFillSimulator use, so the
+    package's own breach detection compares like units.
+    """
+
+    def __init__(
+        self,
+        executor,
+        reference_price: float | None = None,
+        reference_price_timestamp: float | None = None,
+        reference_prices: dict[str, float] | None = None,
+        reference_timestamps: dict[str, float] | None = None,
+    ):
+        self.executor = executor
+        # Legacy single-reference form: used when every leg in a package is
+        # the same instrument. Per-asset maps take precedence when provided,
+        # which is what a mixed-instrument package (spot + perp) needs — each
+        # leg verifies its fill against ITS OWN instrument's reference price.
+        self.reference_price = reference_price
+        self.reference_price_timestamp = reference_price_timestamp
+        self.reference_prices = reference_prices or {}
+        self.reference_timestamps = reference_timestamps or {}
+
+    def _reference_for(self, step: Step) -> tuple[float | None, float | None]:
+        price = self.reference_prices.get(step.asset, self.reference_price)
+        timestamp = self.reference_timestamps.get(
+            step.asset, self.reference_price_timestamp
+        )
+        return price, timestamp
+
+    def _step_to_order(self, step: Step, notional: float) -> OrderRequest:
+        action = step.action
+        side: OrderSide
+        if action == "buy_spot":
+            side, inst = "buy", step.asset
+        elif action == "sell_spot":
+            side, inst = "sell", step.asset
+        elif action == "short_perp":
+            side, inst = "sell", step.asset
+        elif action == "cover_perp":
+            side, inst = "buy", step.asset
+        else:  # pragma: no cover - validate_steps rejects unknown actions before dispatch
+            raise ValueError(f"unknown multi-leg action: {action}")
+        return OrderRequest(
+            inst_id=inst,
+            side=side,
+            order_type="market",
+            size=f"{notional:.2f}",
+            client_oid=f"pkgleg_{step.asset.replace('-', '')}_{uuid.uuid4().hex[:8]}",
+            reduce_only=action in ("sell_spot", "cover_perp"),
+        )
+
+    def __call__(self, step: Step, notional: float) -> LegResult:
+        import asyncio
+
+        order = self._step_to_order(step, notional)
+        price, timestamp = self._reference_for(step)
+        result = asyncio.run(
+            self.executor.place_order(
+                order,
+                current_price=price,
+                current_price_timestamp=timestamp,
+            )
+        )
+        filled = result.state in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED)
+        # The executor returns the fill immediately from the OKX response but
+        # leaves state=PENDING (it does not poll for completion), so a live
+        # market fill shows up as PENDING with a non-None fill_px. A real fill
+        # has a fill price; no fill price means the leg didn't execute.
+        if not filled and result.fill_px is not None:
+            filled = True
+        fill_price = float(result.fill_px) if result.fill_px is not None else None
+        # executor reports slippage as a percentage; multi-leg treats it as a
+        # fraction (0.003 = 0.3%), so divide by 100 to keep like units.
+        slippage_pct = (
+            result.slippage_pct / 100.0 if result.slippage_pct is not None else None
+        )
+        return LegResult(
+            step=step,
+            filled=filled,
+            fill_price=fill_price,
+            slippage_pct=slippage_pct,
+        )
