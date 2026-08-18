@@ -1,15 +1,25 @@
 """
-Deploy TradeAuditTrail.sol to X Layer Testnet using web3.py.
+Deploy repo contracts to X Layer Testnet using web3.py.
+
+Contracts:
+  - TradeAuditTrail (audit log; no constructor args)
+  - TradingVault (pooled USDT vault; needs VAULT_* env vars below)
 
 Prerequisites:
   pip install web3 eth-account eth-abi
   Set environment:
     XLAYER_RPC_URL=https://testnet-rpc.xlayer.tech
     DEPLOYER_PRIVATE_KEY=0x...
-    AUDIT_CONTRACT_ADDRESS=<after first deploy>
+  TradingVault also needs:
+    VAULT_ASSET_ADDRESS=<USDT address on X Layer>
+    VAULT_AGENT_ADDRESS=<agent EOA that will trade/attest>
+    VAULT_MIN_DEPOSIT=<asset minimal units, 6 dp for USDT>
+    VAULT_MAX_TVL=<asset minimal units>
+    VAULT_ATTEST_TIMELOCK=<seconds between NAV attestations>
 
 Usage:
-  python scripts/deploy_contract.py
+  python deploy.py                   # deploy TradeAuditTrail (default)
+  python deploy.py TradingVault      # deploy TradingVault
 """
 import json
 import os
@@ -20,27 +30,27 @@ from web3 import Web3 as Web
 from eth_account import Account
 
 CONTRACT_DIR = Path(__file__).resolve().parent.parent  # contracts/
-ABI_PATH = CONTRACT_DIR / "artifacts" / "TradeAuditTrail_abi.json"
-BYTECODE_PATH = CONTRACT_DIR / "artifacts" / "TradeAuditTrail_bytecode.txt"
 RPC_URL = os.getenv("XLAYER_RPC_URL", "https://xlayertestrpc.okx.com")
 PRIVATE_KEY = os.getenv("DEPLOYER_PRIVATE_KEY")
 CHAIN_ID = 1952  # X Layer Testnet (per RPC)
 
 
-def deploy_contract():
+def _artifacts(name):
+    abi_path = CONTRACT_DIR / "artifacts" / f"{name}_abi.json"
+    bin_path = CONTRACT_DIR / "artifacts" / f"{name}_bytecode.txt"
+    if not abi_path.exists() or not bin_path.exists():
+        print(f"ERROR: Compiled artifacts not found for {name}.")
+        print("Run the Solidity compiler first:")
+        print('  python compile_contract.py')
+        sys.exit(1)
+    return json.loads(abi_path.read_text()), bin_path.read_text().strip()
+
+
+def _prepare():
     if not PRIVATE_KEY:
         print("ERROR: Set DEPLOYER_PRIVATE_KEY environment variable")
         print("Example: set DEPLOYER_PRIVATE_KEY=0x...")
         sys.exit(1)
-
-    if not ABI_PATH.exists() or not BYTECODE_PATH.exists():
-        print("ERROR: Compiled artifacts not found.")
-        print("Run the Solidity compiler first:")
-        print('  python compile_contract.py')
-        sys.exit(1)
-
-    abi = json.loads(ABI_PATH.read_text())
-    bytecode = BYTECODE_PATH.read_text().strip()
 
     print(f"Connecting to X Layer Testnet: {RPC_URL}")
     w3 = Web(Web.HTTPProvider(RPC_URL))
@@ -63,11 +73,15 @@ def deploy_contract():
         print("Get OKB (gas token for X Layer) at: https://faucet.xlayer.tech")
         print("Continuing anyway...")
 
-    print("\nDeploying TradeAuditTrail contract...")
-    Contract = w3.eth.contract(abi=abi, bytecode=bytecode)
+    return w3, account
+
+
+def _send(w3, account, contract, constructor_args, label):
+    print(f"\nDeploying {label} contract...")
+    Contract = w3.eth.contract(abi=contract[0], bytecode=contract[1])
 
     nonce = w3.eth.get_transaction_count(account.address)
-    tx = Contract.constructor().build_transaction({
+    tx = Contract.constructor(*constructor_args).build_transaction({
         "chainId": CHAIN_ID,
         "gas": 3000000,
         "gasPrice": w3.to_wei("1", "gwei"),
@@ -75,28 +89,23 @@ def deploy_contract():
     })
 
     signed = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
-    print(f"Signed transaction. Sending...")
+    print("Signed transaction. Sending...")
 
     tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
     print(f"Transaction hash: {tx_hash.hex()}")
-    print(f"Waiting for confirmation...")
+    print("Waiting for confirmation...")
 
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+    contract_address = receipt.get('contractAddress', receipt.get('contract_address'))
+
     print(f"\nContract deployed!")
-    print(f"Address: {receipt.get('contractAddress', receipt.get('contract_address', 'unknown'))}")
+    print(f"Address: {contract_address}")
     print(f"Block: {receipt.get('blockNumber', receipt.get('block_number', 'unknown'))}")
     print(f"Gas used: {receipt.get('gasUsed', receipt.get('gas_used', 'unknown'))}")
     print(f"Status: {'SUCCESS' if receipt.get('status', 0) == 1 else 'FAILED'}")
 
-    contract_address = receipt.get('contractAddress', receipt.get('contract_address'))
-
-    # Verify contract is callable
-    deployed = w3.eth.contract(address=contract_address, abi=abi)
-    count = deployed.functions.getDecisionCount().call()
-    print(f"\nVerification: getDecisionCount() = {count}")
-
-    # Save deployment info
     deploy_info = {
+        "contract": label,
         "address": contract_address,
         "chain_id": CHAIN_ID,
         "tx_hash": tx_hash.hex(),
@@ -105,17 +114,61 @@ def deploy_contract():
         "deployer": account.address,
     }
     info_path = CONTRACT_DIR / "deployment.json"
-    with open(info_path, "w") as f:
-        json.dump(deploy_info, f, indent=2)
+    info_path.write_text(json.dumps(deploy_info, indent=2))
     print(f"\nDeployment info saved to {info_path}")
-
-    print(f"\nNext steps:")
-    print(f"  1. Set AUDIT_CONTRACT_ADDRESS={contract_address}")
-    print(f"  2. Run setRiskParams() to configure the agent")
-    print(f"  3. Start the trading agent: uvicorn src.main:app --port 8000")
-
     return contract_address
 
 
+def deploy_audit_trail():
+    w3, account = _prepare()
+    contract = _artifacts("TradeAuditTrail")
+    address = _send(w3, account, contract, (), "TradeAuditTrail")
+
+    deployed = w3.eth.contract(address=address, abi=contract[0])
+    count = deployed.functions.getDecisionCount().call()
+    print(f"\nVerification: getDecisionCount() = {count}")
+
+    print(f"\nNext steps:")
+    print(f"  1. Set AUDIT_CONTRACT_ADDRESS={address}")
+    print(f"  2. Run setRiskParams() to configure the agent")
+    print(f"  3. Start the trading agent: uvicorn src.main:app --port 8000")
+    return address
+
+
+def deploy_trading_vault():
+    w3, account = _prepare()
+    contract = _artifacts("TradingVault")
+
+    asset = os.getenv("VAULT_ASSET_ADDRESS")
+    agent_addr = os.getenv("VAULT_AGENT_ADDRESS")
+    min_deposit = os.getenv("VAULT_MIN_DEPOSIT")
+    max_tvl = os.getenv("VAULT_MAX_TVL")
+    attest_timelock = os.getenv("VAULT_ATTEST_TIMELOCK", "3600")
+
+    missing = [k for k, v in {"VAULT_ASSET_ADDRESS": asset,
+                              "VAULT_AGENT_ADDRESS": agent_addr,
+                              "VAULT_MIN_DEPOSIT": min_deposit,
+                              "VAULT_MAX_TVL": max_tvl}.items() if not v]
+    if missing:
+        print(f"ERROR: Missing env vars: {', '.join(missing)}")
+        print("TradingVault needs USDT asset address, agent EOA, and caps.")
+        sys.exit(1)
+
+    address = _send(w3, account, contract,
+                    (asset, agent_addr, int(min_deposit), int(max_tvl), int(attest_timelock)),
+                    "TradingVault")
+
+    deployed = w3.eth.contract(address=address, abi=contract[0])
+    print(f"\nVerification: totalAssets() = {deployed.functions.totalAssets().call()}")
+    print(f"  asset = {asset}")
+    print(f"  agent = {agent_addr}")
+    print(f"  MIN_DEPOSIT = {min_deposit}, MAX_TVL = {max_tvl}, ATTEST_TIMELOCK = {attest_timelock}")
+    return address
+
+
 if __name__ == "__main__":
-    deploy_contract()
+    choice = sys.argv[1] if len(sys.argv) > 1 else "TradeAuditTrail"
+    if choice == "TradingVault":
+        deploy_trading_vault()
+    else:
+        deploy_audit_trail()

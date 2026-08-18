@@ -54,7 +54,15 @@ drives the curator):
   integrity block, confidence-floor skip, and risk-gate rejection, complementing
   the on-chain decision log. Surface: `GET /api/v1/curator-profile`.
 
-Tests: `python -m pytest tests/ -q` — 258 tests, fully offline.
+Tests: `python -m pytest tests/ -q` — 280 tests, fully offline.
+
+> **External-user strategy:** see `docs/DESIGN-external-vault.md` — pooled
+> `TradingVault.sol` (ERC-4626 style) so external deposits grow the same pot
+> the agent already trades, plus a separate depositor-facing surface that
+> answers "is my money safe / is it working / can I get it out" and links
+> directly to the on-chain audit trail. Vault contract, offline EVM tests
+> (`tests/test_trading_vault.py`, 22 cases) and artifacts in
+> `contracts/artifacts/`; the depositor-facing UI surface is still design-only.
 
 ## Files
 
