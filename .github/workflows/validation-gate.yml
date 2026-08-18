@@ -19,4 +19,9 @@ jobs:
       - name: Run validation gate
         # Blocks the deploy only when VALIDATION_RETURNS_PATH is configured and
         # the strategy fails the Calmar/PBO bar. Unset => honest null (skip).
+        # PYTHONPATH: scripts/check_validation_gate.py imports src.validation,
+        # but running `python scripts/...` puts scripts/ (not the repo root) on
+        # sys.path, so src is undiscoverable without this.
         run: python scripts/check_validation_gate.py
+        env:
+          PYTHONPATH: ${{ github.workspace }}
