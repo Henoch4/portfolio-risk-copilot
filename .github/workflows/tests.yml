@@ -17,7 +17,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt -r requirements-dev.txt
-          pip install py-solc-x>=2.0.0 eth-tester>=0.8.0
+          pip install py-solc-x>=2.0.0 "eth-tester[py-evm]>=0.8.0"
           python -c "from solcx import install_solc; install_solc('0.8.29')"
       - name: Run tests
         run: python -m pytest tests/ -q
