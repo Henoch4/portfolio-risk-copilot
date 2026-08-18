@@ -23,24 +23,24 @@ from pydantic import BaseModel, Field
 
 # x402 payment middleware — only available when OKX credentials are configured.
 # Guard against import failures so the app boots in dry-run mode without x402 deps.
+# NOTE: x402 >= 2.19 renamed the facilitator API — the OKXAuthConfig /
+# OKXFacilitatorClient / OKXFacilitatorConfig classes were removed and replaced
+# by FacilitatorConfig (url/auth_provider) + HTTPFacilitatorClient. The imports
+# below target that current API; the `# type: ignore[assignment]` lines only
+# cover the None fallback when the SDK is absent.
 try:
-    from x402.http import OKXAuthConfig as _OKXAuthConfig
-    OKXAuthConfig = _OKXAuthConfig
-    from x402.http import OKXFacilitatorClient, OKXFacilitatorConfig
+    from x402.http import FacilitatorConfig, HTTPFacilitatorClient
     from x402.http.middleware.fastapi import PaymentMiddlewareASGI
     from x402.mechanisms.evm.exact.server import ExactEvmScheme
-    from x402.mechanisms.evm.deferred.server import AggrDeferredEvmScheme
     from x402.server import x402ResourceServer
     _x402_available = True
 except ImportError:
     _x402_available = False
-    OKXAuthConfig = None
-    OKXFacilitatorClient = None
-    OKXFacilitatorConfig = None
-    PaymentMiddlewareASGI = None
-    ExactEvmScheme = None
-    AggrDeferredEvmScheme = None
-    x402ResourceServer = None
+    FacilitatorConfig = None  # type: ignore[assignment,misc]
+    HTTPFacilitatorClient = None  # type: ignore[assignment,misc]
+    PaymentMiddlewareASGI = None  # type: ignore[assignment,misc]
+    ExactEvmScheme = None  # type: ignore[assignment,misc]
+    x402ResourceServer = None  # type: ignore[assignment,misc]
 
 from .auditor import run_audit, run_audit_from_data, AuditReport
 from .okx_cli import OkxCli, OkxCliConfig, OkxCliError
@@ -138,19 +138,11 @@ def _require_agent_token(x_agent_token: str | None = Header(default=None)) -> No
 # --- x402 payment SDK wiring ---
 _pay_to = os.getenv("PAY_TO_ADDRESS", "")
 if _pay_to and _x402_available:
-    _facilitator = OKXFacilitatorClient(
-        OKXFacilitatorConfig(
-            auth=OKXAuthConfig(
-                api_key=os.getenv("OKX_API_KEY", ""),
-                secret_key=os.getenv("OKX_SECRET_KEY", ""),
-                passphrase=os.getenv("OKX_PASSPHRASE", ""),
-            ),
-            base_url=os.getenv("OKX_BASE_URL", ""),
-        )
+    _facilitator = HTTPFacilitatorClient(
+        FacilitatorConfig(url=os.getenv("OKX_BASE_URL", ""))
     )
     _x402_server = x402ResourceServer(_facilitator)
     _x402_server.register("eip155:196", ExactEvmScheme())
-    _x402_server.register("eip155:196", AggrDeferredEvmScheme())
     _PAID_ROUTES: dict = {}
     app.add_middleware(PaymentMiddlewareASGI, routes=_PAID_ROUTES, server=_x402_server)
 
