@@ -281,6 +281,9 @@
     <div class="tab-content" id="tab-withdraw">
       <div class="card">
         <div class="card-title">Request Withdrawal</div>
+        <div style="font-size:0.82rem; color:var(--text-muted); margin-bottom:var(--space-4); padding:var(--space-3); background:var(--surface-2); border-radius:var(--radius-btn); border:1px solid var(--border);">
+          Settlement: after 48h timelock you can finalize. Finalization is manual &mdash; there is no forced-close mechanism. If you don't finalize, your shares stay locked.
+        </div>
         <div class="form-group">
           <label class="form-label">Shares to withdraw</label>
           <input class="form-input num" type="number" id="withdraw-shares" placeholder="0.00" step="0.000000000000000001" min="0">
@@ -517,6 +520,46 @@
         }
       }
 
+      // ---- localStorage helpers for withdrawal request IDs ----
+      function _storageKey(addr) { return 'tv_withdrawal_ids_' + addr.toLowerCase(); }
+
+      function saveWithdrawalId(addr, id) {
+        try {
+          var key = _storageKey(addr);
+          var existing = JSON.parse(localStorage.getItem(key) || '[]');
+          if (existing.indexOf(id) === -1) existing.push(id);
+          localStorage.setItem(key, JSON.stringify(existing));
+        } catch (e) { /* localStorage unavailable — not fatal */ }
+      }
+
+      function getSavedWithdrawalIds(addr) {
+        try { return JSON.parse(localStorage.getItem(_storageKey(addr)) || '[]'); }
+        catch (e) { return []; }
+      }
+
+      // Parse WithdrawalRequested event from tx receipt logs
+      function parseWithdrawalRequestId(receipt, vaultAddr) {
+        // event WithdrawalRequested(uint256 indexed requestId, address indexed account, uint256 shares)
+        var topic0 = ethers.id('WithdrawalRequested(uint256,address,uint256)');
+        for (var i = 0; i < (receipt.logs || []).length; i++) {
+          var log = receipt.logs[i];
+          if (log.address && log.address.toLowerCase() === vaultAddr.toLowerCase() &&
+              log.topics && log.topics[0] === topic0) {
+            return parseInt(log.topics[1], 16);
+          }
+        }
+        return null;
+      }
+
+      function copyToClipboard(text) {
+        if (navigator.clipboard) { navigator.clipboard.writeText(text); return; }
+        var ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+
       async function doRequestWithdraw() {
         var sharesInput = document.getElementById('withdraw-shares');
         var shares = parseFloat(sharesInput.value);
@@ -527,7 +570,21 @@
           setStatus('withdraw-status', 'Requesting withdrawal...', 'pending');
           var tx = await vaultContract.requestWithdraw(rawShares);
           var receipt = await tx.wait();
-          setStatus('withdraw-status', 'Withdrawal requested. Tx: ' + receipt.hash.slice(0, 10) + '...', 'success');
+
+          // Parse request ID from event logs
+          var reqId = parseWithdrawalRequestId(receipt, vaultInfo.address);
+          if (reqId != null) {
+            saveWithdrawalId(userAddress, reqId);
+            var statusEl = document.getElementById('withdraw-status');
+            statusEl.innerHTML =
+              '<div style="margin-bottom:0.5rem;">Withdrawal requested. Tx: ' + receipt.hash.slice(0, 10) + '...</div>' +
+              '<div style="font-weight:700; margin-bottom:0.4rem;">Request ID: <span class="num" id="withdraw-reqid">' + reqId + '</span>' +
+              ' <button onclick="window._copyReqId()" style="background:none;border:1px solid var(--border);color:var(--text-secondary);padding:2px 8px;border-radius:4px;font-size:0.75rem;cursor:pointer;">Copy</button></div>' +
+              '<div style="font-size:0.78rem; color:var(--text-muted);">Save this ID \u2014 you need it to check status or finalize.</div>';
+            statusEl.className = 'status-msg show success';
+          } else {
+            setStatus('withdraw-status', 'Withdrawal requested. Tx: ' + receipt.hash.slice(0, 10) + '...', 'success');
+          }
           sharesInput.value = '';
           await loadPosition();
           await loadPendingWithdrawals();
@@ -536,6 +593,11 @@
           setStatus('withdraw-status', 'Request failed: ' + reason, 'error');
         }
       }
+
+      window._copyReqId = function() {
+        var el = document.getElementById('withdraw-reqid');
+        if (el) { copyToClipboard(el.textContent); }
+      };
 
       async function loadPosition() {
         if (!userAddress || !vaultStats || !vaultStats.deployed) return;
@@ -562,17 +624,31 @@
         if (!userAddress) return;
         var container = document.getElementById('pending-withdrawals');
         try {
-          var countRes = await fetch('/api/v1/vault/stats');
-          var stats = await countRes.json();
+          var statsRes = await fetch('/api/v1/vault/stats');
+          var stats = await statsRes.json();
           if (!stats.deployed) return;
-          container.innerHTML =
-            '<p style="font-size:0.85rem; color:var(--text-secondary);">' +
-            'To finalize a withdrawal, enter the request ID and click Finalize.</p>' +
-            '<div style="display:flex; gap:0.5rem; margin-top:0.75rem;">' +
-            '<input class="form-input num" type="number" id="finalize-id" placeholder="Request ID" style="flex:1;">' +
-            '<button class="btn btn-outline" style="width:auto; padding:0.5rem 1rem;" onclick="window._doFinalize()">Finalize</button>' +
-            '</div>' +
-            '<div id="finalize-status" class="status-msg"></div>';
+
+          var savedIds = getSavedWithdrawalIds(userAddress);
+          var html = '';
+          if (savedIds.length > 0) {
+            html += '<p style="font-size:0.82rem; color:var(--text-secondary); margin-bottom:0.5rem;">Your saved request IDs:</p>';
+            html += '<div style="display:flex; flex-wrap:wrap; gap:0.4rem; margin-bottom:0.75rem;">';
+            for (var j = 0; j < savedIds.length; j++) {
+              html += '<span class="num" style="background:var(--surface-3); padding:0.3rem 0.6rem; border-radius:4px; font-size:0.82rem; cursor:pointer;" ' +
+                      'onclick="document.getElementById(\'finalize-id\').value=' + savedIds[j] + '" title="Click to fill">' +
+                      '#' + savedIds[j] + '</span>';
+            }
+            html += '</div>';
+          }
+
+          html += '<p style="font-size:0.82rem; color:var(--text-secondary); margin-bottom:0.5rem;">Or enter a request ID manually:</p>';
+          html += '<div style="display:flex; gap:0.5rem;">';
+          html += '<input class="form-input num" type="number" id="finalize-id" placeholder="Request ID" style="flex:1;">';
+          html += '<button class="btn btn-outline" style="width:auto; padding:0.5rem 1rem;" onclick="window._doFinalize()">Finalize</button>';
+          html += '</div>';
+          html += '<div id="finalize-status" class="status-msg"></div>';
+
+          container.innerHTML = html;
         } catch (e) {
           console.warn('Pending withdrawals load failed:', e);
         }
