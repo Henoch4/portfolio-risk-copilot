@@ -42,10 +42,12 @@ drives the curator):
   Integration is **default-passthrough**: the profile is the default per knob;
   `CURATOR_*` env vars override only the knob they name.
 - **Atomic multi-leg execution** (`src/multi_leg.py`) — a two+ leg package
-  dispatched concurrently through an explicit state machine
+  submitted serially in the same cycle through an explicit state machine
   (PENDING_FILL → LOCKED → SETTLED, or ABORTED). Partial fills unwind the
   filled leg immediately; unlike the source MVP, per-leg `max_slippage_pct` is
   actually enforced — a breached fill triggers the unwind path, never LOCKED.
+  Closing legs are admitted past the kill switch so a hard-collar fill (which
+  trips the halt) can never block the very unwind that must flatten it.
 - **Strategy validation** (`src/validation.py`) — walk-forward windows, PBO,
   Sharpe/CAGR/max-drawdown/Calmar, and a `cleared_for_paper_trading` gate
   (Calmar ≥ 1.0 AND PBO ≤ 0.5). Surface: `GET /api/v1/validation`.

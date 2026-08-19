@@ -166,6 +166,50 @@ def test_no_fill_at_all_is_clean_abort_without_unwind():
     assert len(unwind_calls) == 0
 
 
+def test_unwind_failure_never_marks_package_unwound():
+    """Regression: resolvers set pkg.unwound unconditionally, so even a failed
+    unwind order (rejected at the exchange, network timeout, kill-switch block)
+    was recorded as 'safely unwound' while real exposure remained. unwound=True
+    now requires every unwind leg to report a real fill."""
+    mgr = MultiLegExecutionManager()
+    pkg = mgr.propose_package(two_leg_steps(), notional=10_000)
+
+    def one_fills_one_doesnt(step, notional):
+        filled = step.venue == "venue_a"
+        return LegResult(step=step, filled=filled,
+                         fill_price=notional if filled else None,
+                         slippage_pct=0.001 if filled else None)
+
+    pkg = mgr.dispatch_concurrent(pkg, one_fills_one_doesnt)
+
+    # The unwind attempt fails: the cancellation order is rejected by the venue.
+    def failed_unwind(step, notional):
+        return LegResult(step=step, filled=False, fill_price=None, slippage_pct=None)
+
+    pkg = mgr.resolve_partial_fill(pkg, failed_unwind)
+    assert pkg.state == PackageState.ABORTED
+    assert pkg.unwound is False  # naked exposure remains; must NOT claim safe
+
+
+def test_slippage_breach_unwind_failure_keeps_unwound_false():
+    mgr = MultiLegExecutionManager()
+    pkg = mgr.propose_package(two_leg_steps(), notional=10_000)
+
+    def breach_all(step, notional):
+        return LegResult(step=step, filled=True, fill_price=notional,
+                         slippage_pct=0.05)  # 5% >> 0.3% collar on every leg
+
+    pkg = mgr.dispatch_concurrent(pkg, breach_all)
+    assert pkg.slippage_breached is True
+
+    def failed_unwind(step, notional):
+        return LegResult(step=step, filled=False, fill_price=None, slippage_pct=None)
+
+    pkg = mgr.resolve_slippage_breach(pkg, failed_unwind)
+    assert pkg.state == PackageState.ABORTED
+    assert pkg.unwound is False
+
+
 def test_duplication_check_blocks_second_package_same_asset():
     mgr = MultiLegExecutionManager()
     mgr.propose_package(two_leg_steps(), notional=10_000)

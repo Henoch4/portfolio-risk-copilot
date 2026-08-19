@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -21,6 +22,8 @@ from enum import Enum
 from typing import Literal
 
 from .okx_cli import OkxCli, OkxCliConfig, OkxCliError
+
+logger = logging.getLogger(__name__)
 
 
 OrderSide = Literal["buy", "sell"]
@@ -48,6 +51,7 @@ class OrderRequest:
     client_oid: str | None = None  # custom order ID for tracking
     reduce_only: bool = False
     confidence_bps: int | None = None  # signal confidence in basis points (0-10000)
+    unwind: bool = False  # True for closing/unwind legs of a multi-leg package
 
     def __post_init__(self):
         if not self.client_oid:
@@ -174,6 +178,7 @@ class OrderExecutor:
             order,
             current_price=current_price,
             current_price_timestamp=current_price_timestamp,
+            unwind=order.unwind,
         )
         if not risk_check.approved:
             raise ExecutionError(
@@ -503,6 +508,7 @@ class RiskGate:
         current_price: float | None = None,
         current_price_timestamp: float | None = None,
         current_position_side: str | None = None,
+        unwind: bool = False,
     ) -> RiskCheckResult:
         """
         Check an order against all risk parameters.
@@ -517,13 +523,28 @@ class RiskGate:
             age cannot be verified and is treated as stale (fail-safe-defaults).
         current_position_side: "long" | "short" | None, used to enforce reduce-only
             semantics on sell orders — see check 7 below.
+        unwind: True for a closing leg of a multi-leg package (sent by the
+            resolvers when unwinding a partial fill or slippage breach). An
+            unwind order ADMITS the kill switch — the exact event that trips it
+            (a hard-collar fill) is the event that makes the unwind mandatory.
+            All other checks still run; only the halt is lifted, and the
+            admission is logged.
         """
         # 0. Kill switch — checked first, before anything else, no exceptions.
-        if self._kill_switch_active:
+        # Unwind orders are the sole exception: a hard-collar breach trips the
+        # kill switch inside the very fill that created naked exposure, so the
+        # unwind that must flatten it may not be blocked by the halt it caused.
+        if self._kill_switch_active and not unwind:
             return RiskCheckResult(
                 approved=False,
                 code="KILL_SWITCH_ACTIVE",
                 reason=f"Kill switch is active: {self._kill_switch_reason}",
+            )
+        if self._kill_switch_active and unwind:
+            logger.warning(
+                "KILL_SWITCH_BYPASS: admitting unwind order %s (%s) while kill "
+                "switch is active (%s) — closing leg required to flatten exposure.",
+                order.client_oid, order.inst_id, self._kill_switch_reason,
             )
 
         # 1. Asset allowlist — exact match OR same base asset (the spot leg

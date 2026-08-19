@@ -1,11 +1,19 @@
 """
 Atomic multi-leg execution -- the piece that makes a delta-neutral thesis
-buildable rather than aspirational. Multiple legs are dispatched concurrently,
-tracked as ONE package via an explicit state machine, and unwound automatically
-on a partial fill rather than left as unintended directional exposure.
+buildable rather than aspirational. Multiple legs are dispatched in a single
+cycle (serial submission, fail-closed) and tracked as ONE package via an
+explicit state machine, unwound automatically on a partial fill rather than
+left as unintended directional exposure.
 
 State machine: PENDING_FILL -> LOCKED -> SETTLED, with ABORTED as an explicit
 outcome (not a caught exception).
+
+Serially-dispatched, not truly concurrent: each leg is a full network round-trip,
+so leg 2 is submitted only after leg 1's fill is known. This is the documented
+trade-off — true parallel dispatch would race the shared RiskGate state. The
+leg-timing risk between fills is bounded by the settlement-window model (the
+funding-arb package is deliberately built one leg at a time, not atomically on
+an exchange). The resolvers fail closed if any leg mis-fills.
 
 Different from the source MVP this was ported from: every declared limit is
 actually checked in the code path that executes it. The original dispatch
@@ -120,8 +128,9 @@ class MultiLegExecutionManager:
 
     def dispatch_concurrent(self, pkg: Package, fill_simulator) -> Package:
         """
-        All legs submitted in the same cycle (concurrent, not sequential).
-        `fill_simulator(step, notional_for_leg) -> LegResult`.
+        All legs submitted in the same cycle (serial per-leg submission, in
+        order), so the package is either fully funded or its peers are never
+        assumed filled. `fill_simulator(step, notional_for_leg) -> LegResult`.
 
         Every declared per-leg slippage limit is enforced here -- this is the
         code path that executes the order. If a leg fills beyond its
@@ -167,9 +176,15 @@ class MultiLegExecutionManager:
             return pkg
 
         # partial fill: unwind the filled leg(s) immediately
+        unwind_results = []
         for leg in filled_legs:
-            unwind_simulator(leg.step.inverse(), pkg.notional * leg.step.amount_ratio)
-        pkg.unwound = True
+            unwind_results.append(
+                unwind_simulator(leg.step.inverse(), pkg.notional * leg.step.amount_ratio)
+            )
+        # Only claim the position is safe if every unwind leg actually filled.
+        # An unwind that raises or reports unfilled leaves naked exposure —
+        # fail-closed means we say so, never silently mark it unwound.
+        pkg.unwound = bool(unwind_results) and all(r.filled for r in unwind_results)
         pkg.state = PackageState.ABORTED
         self._release(pkg)
         return pkg
@@ -208,9 +223,12 @@ class MultiLegExecutionManager:
             self._release(pkg)
             return pkg
 
+        unwind_results = []
         for leg in filled_legs:
-            unwind_simulator(leg.step.inverse(), pkg.notional * leg.step.amount_ratio)
-        pkg.unwound = True
+            unwind_results.append(
+                unwind_simulator(leg.step.inverse(), pkg.notional * leg.step.amount_ratio)
+            )
+        pkg.unwound = bool(unwind_results) and all(r.filled for r in unwind_results)
         pkg.state = PackageState.ABORTED
         self._release(pkg)
         return pkg
@@ -325,6 +343,10 @@ class LiveFillSimulator:
             size=f"{notional:.2f}",
             client_oid=f"pkgleg_{step.asset.replace('-', '')}_{uuid.uuid4().hex[:8]}",
             reduce_only=action in ("sell_spot", "cover_perp"),
+            # Closing legs (sell_spot / cover_perp) are unwinds: they flatten
+            # exposure, so they are admitted past the kill switch (which the
+            # very fill that created the exposure may have just tripped).
+            unwind=action in ("sell_spot", "cover_perp"),
         )
 
     def __call__(self, step: Step, notional: float) -> LegResult:

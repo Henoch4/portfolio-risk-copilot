@@ -769,3 +769,79 @@ class TestCliArgvConstruction:
         )
         args = cli.calls[0][0]
         assert "--reduceOnly" not in args, args
+
+
+class TestUnwindKillSwitchBypass:
+    """Regression: a hard-collar fill trips the kill switch inside the very
+    fill that created naked exposure. The unwind order that must flatten it was
+    then blocked by the halt it caused (the same kill switch), so resolve_*
+    was recording 'unwound' while the closing leg was never admitted. Unwind
+    orders now bypass ONLY the kill switch; every other check still runs."""
+
+    def _gate(self):
+        return RiskGate()
+
+    def _unwind_order(self):
+        return OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="sell", order_type="market",
+            size="100", client_oid="unw1", reduce_only=True, unwind=True,
+        )
+
+    def test_unwind_order_admitted_during_kill_switch(self):
+        gate = self._gate()
+        gate.activate_kill_switch("hard-collar breach on pkg 3")
+        result = gate.check_order(
+            self._unwind_order(), "agent1",
+            current_price=50000, current_price_timestamp=_fresh_ts(),
+            current_position_side="long", unwind=True,
+        )
+        assert result.approved is True, result
+        assert result.code == "APPROVED"
+
+    def test_non_unwind_order_still_rejected_during_kill_switch(self):
+        gate = self._gate()
+        gate.activate_kill_switch("manual")
+        order = self._unwind_order()
+        order.unwind = False
+        result = gate.check_order(
+            order, "agent1",
+            current_price=50000, current_price_timestamp=_fresh_ts(),
+        )
+        assert result.approved is False
+        assert result.code == "KILL_SWITCH_ACTIVE"
+
+    def test_unwind_order_still_enforces_other_checks(self):
+        # Bypassing the kill switch must not bypass the asset allowlist.
+        gate = self._gate()
+        gate.activate_kill_switch("manual")
+        order = self._unwind_order()
+        order.inst_id = "DOGE-USDT-SWAP"  # off allowlist
+        result = gate.check_order(
+            order, "agent1",
+            current_price=50000, current_price_timestamp=_fresh_ts(),
+            unwind=True,
+        )
+        assert result.approved is False
+        assert result.code == "ASSET_NOT_ALLOWED"
+
+    @pytest.mark.asyncio
+    async def test_live_fill_simulator_marks_closing_legs_as_unwind(self):
+        from src.multi_leg import LiveFillSimulator, Step
+        sim = LiveFillSimulator(None)
+        order = sim._step_to_order(
+            Step(venue="okx", action="sell_spot", asset="BTC-USDT", amount_ratio=0.5),
+            1000.0,
+        )
+        assert order.unwind is True
+        assert order.reduce_only is True
+
+    @pytest.mark.asyncio
+    async def test_live_fill_simulator_opening_legs_not_unwind(self):
+        from src.multi_leg import LiveFillSimulator, Step
+        sim = LiveFillSimulator(None)
+        order = sim._step_to_order(
+            Step(venue="okx", action="short_perp", asset="BTC-USDT-SWAP", amount_ratio=0.5),
+            1000.0,
+        )
+        assert order.unwind is False
+        assert order.reduce_only is False
