@@ -205,9 +205,9 @@ class OrderExecutor:
                 "--side", order.side,
                 "--ordType", "m" if order.order_type == "market" else "l",
                 "--sz", order.size,
-                *[f"--px {order.px}" for _ in [None] if order.px],
+                *(["--px", order.px] if order.px else []),
                 "--clOrdId", order.client_oid or "",
-                "--reduceOnly" if order.reduce_only else "",
+                *(["--reduceOnly"] if order.reduce_only else []),
                 use_global_flags=True,
             )
         except OkxCliError as e:

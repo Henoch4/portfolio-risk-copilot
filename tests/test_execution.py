@@ -587,8 +587,10 @@ class _FakeOkxCli:
     def __init__(self, fill_px="50000", state="filled"):
         self.fill_px = fill_px
         self.state = state
+        self.calls: list[tuple] = []
 
     async def run(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
         return {"data": [{
             "ordId": "12345",
             "clOrdId": "auto_fake",
@@ -677,3 +679,93 @@ class TestPostFillVerification:
         executor, _ = self._executor(fill_px="50000")
         with pytest.raises(ExecutionError):
             await executor.place_order(self._order())
+
+
+class TestCliArgvConstruction:
+    """Regression: the CLI runs through asyncio subprocess with NO shell, so a
+    glued token like '--px 50000' (one argv element) would reach the real CLI
+    as a single literal argument and break every live limit order. Also, a
+    stray '' element must never appear in argv — some parsers misread it as a
+    positional argument. See the review finding on execution.py:208/210."""
+
+    def _executor(self):
+        cli = _FakeOkxCli()
+        gate = RiskGate()
+        return OrderExecutor(cli=cli, risk_gate=gate), cli
+
+    @pytest.mark.asyncio
+    async def test_limit_order_px_flag_split_into_two_tokens(self):
+        executor, cli = self._executor()
+        order = OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="buy", order_type="limit",
+            size="100", px="50100", client_oid="lmt1",
+        )
+        await executor.place_order(
+            order, current_price=50000, current_price_timestamp=_fresh_ts(),
+        )
+        args = cli.calls[0][0]
+        assert args[0:6] == ("trade", "order", "--instId", "BTC-USDT-SWAP",
+                             "--side", "buy")
+        # The px flag arrives as two separate argv tokens, never one glued one.
+        assert "--px" in args
+        assert "50100" in args
+        assert args[args.index("--px") + 1] == "50100"
+        assert not any(a.startswith("--px ") for a in args)
+
+    @pytest.mark.asyncio
+    async def test_market_order_omits_px_flag_entirely(self):
+        executor, cli = self._executor()
+        order = OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="buy", order_type="market",
+            size="100", client_oid="mkt1",
+        )
+        await executor.place_order(
+            order, current_price=50000, current_price_timestamp=_fresh_ts(),
+        )
+        args = cli.calls[0][0]
+        assert "--px" not in args
+        assert "50100" not in args
+
+    @pytest.mark.asyncio
+    async def test_no_empty_string_tokens_ever(self):
+        """The earlier bug appended '' when reduce_only=False. No argv token
+        may ever be an empty string, regardless of order flags."""
+        executor, cli = self._executor()
+        for order in (
+            OrderRequest(inst_id="BTC-USDT-SWAP", side="buy", order_type="market",
+                         size="100", client_oid="a", reduce_only=False),
+            OrderRequest(inst_id="BTC-USDT-SWAP", side="sell", order_type="limit",
+                         size="100", px="49900", client_oid="b", reduce_only=False),
+        ):
+            await executor.place_order(
+                order, current_price=50000, current_price_timestamp=_fresh_ts(),
+            )
+        for args, _ in cli.calls:
+            assert "" not in args
+            assert all(a != "" for a in args)
+
+    @pytest.mark.asyncio
+    async def test_reduce_only_flag_present_when_requested(self):
+        executor, cli = self._executor()
+        order = OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="sell", order_type="market",
+            size="100", client_oid="ro1", reduce_only=True,
+        )
+        await executor.place_order(
+            order, current_price=50000, current_price_timestamp=_fresh_ts(),
+        )
+        args = cli.calls[0][0]
+        assert "--reduceOnly" in args, args
+
+    @pytest.mark.asyncio
+    async def test_reduce_only_flag_absent_by_default(self):
+        executor, cli = self._executor()
+        order = OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="buy", order_type="market",
+            size="100", client_oid="nor1",
+        )
+        await executor.place_order(
+            order, current_price=50000, current_price_timestamp=_fresh_ts(),
+        )
+        args = cli.calls[0][0]
+        assert "--reduceOnly" not in args, args
