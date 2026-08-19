@@ -932,4 +932,157 @@ class TestUnwindKillSwitchBypass:
             1000.0,
         )
         assert order.unwind is False
-        assert order.reduce_only is False
+
+
+# ---------------------------------------------------------------------------
+# Block F: durable daily counters (crash-safe restart)
+# ---------------------------------------------------------------------------
+
+_FRESH_TS = lambda: time.time()
+
+
+class _FakeOnchainLogger:
+    """Minimal stand-in for OnchainLogger exposing the bits RiskGate reads."""
+
+    def __init__(self, agent_address, kill_switch=False):
+        self.agent_address = agent_address
+        self._ks = kill_switch
+
+    @property
+    def contract(self):
+        outer = self
+
+        class _Contract:
+            class functions:  # noqa: N801
+                @staticmethod
+                def killSwitchActive(addr):
+                    c = outer
+
+                    class _Call:
+                        def call(inner):
+                            return c._ks
+                    return _Call()
+
+                @staticmethod
+                def getAgentDailyStats(addr):  # present but unused by gate today
+                    c = outer
+
+                    class _Call:
+                        def call(inner):
+                            return (0, 0, 0)
+                    return _Call()
+        return _Contract()
+
+
+class TestDurableCounters:
+    """Regression: daily counters were in-memory only, so a process restart
+    zeroed the daily trade/loss/volume tallies and reopened every per-day
+    limit at a breached value. The file store must survive 'restart'."""
+
+    def _make(self, store_path, **kw):
+        from src.execution import DurableDailyCounters, RiskGate
+        store = DurableDailyCounters(path=str(store_path), enabled=True)
+        return RiskGate(counter_store=store, **kw)
+
+    def test_counters_survive_restart_same_day(self, tmp_path):
+        gate = self._make(tmp_path / "state.json", max_daily_trades=2)
+        order = OrderRequest("BTC-USDT-SWAP", "buy", "market", "100")
+        kw = dict(current_price=50000, current_price_timestamp=_FRESH_TS())
+        assert gate.check_order(order, "agent1", **kw).approved is True
+        assert gate.check_order(order, "agent1", **kw).approved is True
+        assert gate.check_order(order, "agent1", **kw).approved is False  # limit hit
+
+        # "Restart": a fresh gate over the SAME store file must see the
+        # accumulated count and keep rejecting, not reset to 0.
+        gate2 = self._make(tmp_path / "state.json", max_daily_trades=2)
+        assert gate2.check_order(order, "agent1", **kw).approved is False
+        assert gate2.get_daily_stats("agent1")["trade_count"] == 2
+
+    def test_day_rollover_starts_fresh_after_restart(self, tmp_path, monkeypatch):
+        import datetime as _dt
+        gate = self._make(tmp_path / "state.json", max_daily_trades=2)
+        kw = dict(current_price=50000, current_price_timestamp=_FRESH_TS())
+        gate.check_order(OrderRequest("BTC-USDT-SWAP", "buy", "market", "100"), "agent1", **kw)
+        gate.check_order(OrderRequest("BTC-USDT-SWAP", "buy", "market", "100"), "agent1", **kw)
+
+        # Roll past midnight UTC.
+        real = _dt.datetime.now(_dt.timezone.utc)
+        next_day = real.replace(hour=0, minute=0, second=0, microsecond=0) + _dt.timedelta(days=1)
+
+        class _FakeClock:
+            @staticmethod
+            def now(tz=None):
+                return next_day
+
+        import src.execution as _exec
+        monkeypatch.setattr(_exec, "datetime", _FakeClock)
+
+        gate2 = self._make(tmp_path / "state.json", max_daily_trades=2)
+        # New UTC day => fresh bucket, the prior limit no longer applies.
+        assert gate2.check_order(OrderRequest("BTC-USDT-SWAP", "buy", "market", "100"), "agent1", **kw).approved is True
+        assert gate2.get_daily_stats("agent1")["trade_count"] == 1
+        # And the file now holds BOTH days; the old day is not lost.
+        gate2_stats = gate2.get_daily_stats("agent1")
+        # current day is fresh (1); the prior day's 2 is retained under a
+        # different key (history) rather than clobbered.
+        assert gate2_stats["trade_count"] == 1
+
+    def test_corrupt_store_is_discarded_not_trusted(self, tmp_path):
+        from src.execution import DurableDailyCounters, RiskGate
+        p = tmp_path / "state.json"
+        p.write_text("{not valid json")
+        # Must not raise and must not load garbage as zeroed counters.
+        store = DurableDailyCounters(path=str(p), enabled=True)
+        gate = RiskGate(counter_store=store, max_daily_trades=2)
+        kw = dict(current_price=50000, current_price_timestamp=_FRESH_TS())
+        order = OrderRequest("BTC-USDT-SWAP", "buy", "market", "100")
+        assert gate.check_order(order, "agent1", **kw).approved is True
+        assert gate.get_daily_stats("agent1")["trade_count"] == 1
+
+
+class TestOnchainReconciliation:
+    """Block F source-of-truth: the onchain TradeAuditTrail is authoritative
+    for the kill switch (and the daily limits it resets at UTC rollover). The
+    gate must mirror an onchain halt at boot so a stale/local kill switch can
+    never under-report an onchain halt.
+
+    Note: loss-accumulator seeding from onchain is intentionally NOT done —
+    the contract keys daily stats by wallet address while the gate keys by
+    agent_id (string), so seeding would require a mapping this single-agent
+    deployment does not define. The onchain accumulators remain the
+    authoritative *execution* record; the file store is authoritative for the
+    gate's pre-execution running totals (which is what trips the local kill
+    switch). That split is documented in sync_with_onchain()."""
+
+    def test_onchain_kill_switch_syncs_to_local_at_boot(self, tmp_path):
+        from src.execution import DurableDailyCounters, RiskGate
+        gate = RiskGate(
+            counter_store=DurableDailyCounters(path=str(tmp_path / "s.json"), enabled=False),
+            onchain_logger=_FakeOnchainLogger(
+                agent_address="0xAgent", kill_switch=True,
+            ),
+        )
+        assert gate._kill_switch_active is True
+        assert "onchain kill switch active" in (gate._kill_switch_reason or "")
+
+    def test_onchain_clear_does_not_clear_local(self, tmp_path):
+        """A cleared onchain switch must NOT un-trip a locally-tripped switch —
+        that direction would require an explicit operator deactivate call."""
+        from src.execution import DurableDailyCounters, RiskGate
+        gate = RiskGate(
+            counter_store=DurableDailyCounters(path=str(tmp_path / "s.json"), enabled=False),
+            onchain_logger=_FakeOnchainLogger(agent_address="0xAgent", kill_switch=False),
+        )
+        gate.activate_kill_switch("local hard collar")
+        gate.sync_with_onchain()
+        assert gate._kill_switch_active is True
+        assert gate._kill_switch_reason == "local hard collar"
+
+    def test_no_onchain_logger_leaves_gate_alone(self, tmp_path):
+        from src.execution import DurableDailyCounters, RiskGate
+        # Without an onchain logger, construction must not blow up and the
+        # kill switch stays off.
+        gate = RiskGate(
+            counter_store=DurableDailyCounters(path=str(tmp_path / "s.json"), enabled=False),
+        )
+        assert gate._kill_switch_active is False

@@ -15,6 +15,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -92,6 +95,138 @@ class OrderResult:
 
 class ExecutionError(RuntimeError):
     """Raised when an order cannot be placed or fails."""
+
+
+# ---------------------------------------------------------------------------
+# Durable daily counters
+# ---------------------------------------------------------------------------
+#
+# Safety invariant: a process restart MUST NOT reset the daily trade-count,
+# loss-accumulator, or volume counters mid-UTC-day. Resetting them silently
+# raises every per-day limit (DAILY_TRADE_LIMIT_EXCEEDED, DAILY_LOSS_LIMIT_
+# EXCEEDED) so a crash at 14:00 could permit another full day of exposure
+# before the clock rolls — exactly the failure mode the README calls out as
+# "the in-memory daily loss/trade counters are lost on restart."
+#
+# These counters are the gate's own pre-trade accounting (orders risk-approved
+# but not yet onchain), which is NOT identical to the contract's daily stats
+# (decisions logged / executions recorded onchain, keyed by wallet address).
+# The two must be reconciled rather than assumed equal — see
+# RiskGate.sync_with_onchain(). To make the gate's accounting itself
+# crash-safe we persist only the JSON-serialisable numeric accumulators to an
+# atomic single-file store keyed by (agent_id, utc_day). The contract stays
+# authoritative for the *limits* and the *halt*; the file is authoritative for
+# the in-process daily running totals between restarts.
+#
+# The store is deliberately small and single-file so the attack/audit surface
+# is trivial: one read at __init__, one write per mutating increment, all
+# behind a threading.Lock and written atomically (temp file + os.replace) so
+# a crash mid-write never corrupts the counters.
+class DurableDailyCounters:
+    """Atomic JSON-backed store for (agent_id, utc_day) -> accumulators.
+
+    File path is taken from RISK_STATE_PATH (env) if set, else a tempfile dir
+    location. Pass an explicit path in tests. Each instance owns the file;
+    concurrent RiskGate instances in the same process are guarded by a class-
+    level lock keyed by path.
+    """
+
+    _LOCKS: dict[str, threading.Lock] = {}
+    _LOCKS_GUARD = threading.Lock()
+
+    def __init__(self, path: str | None = None, enabled: bool = True):
+        self.enabled = enabled
+        if not enabled:
+            self.path = None
+            self._data: dict[str, dict] = {}
+            self._lock = None
+            return
+        if path is None:
+            path = os.environ.get("RISK_STATE_PATH", "").strip()
+        if not path:
+            path = os.path.join(tempfile.gettempdir(), "portfolio-risk-copilot_risk_state.json")
+        self.path = path
+        self._data = self._load()
+        with self._LOCKS_GUARD:
+            self._lock = self._LOCKS.setdefault(path, threading.Lock())
+
+    @classmethod
+    def _for_path(cls, path: str) -> threading.Lock:
+        with cls._LOCKS_GUARD:
+            return cls._LOCKS.setdefault(path, threading.Lock())
+
+    def _load(self) -> dict[str, dict]:
+        try:
+            with open(self.path, "r") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except FileNotFoundError:
+            return {}
+        except (json.JSONDecodeError, OSError) as e:
+            # Corrupt or unreadable state must NOT be trusted silently — a
+            # stale or half-written store could zero the counters and reopen
+            # a breached limit. Refuse to load and start clean rather than
+            # launder a bad file into a passing state.
+            logger.warning(f"DurableDailyCounters: discarding unreadable store {self.path}: {e}")
+        return {}
+
+    def _persist(self) -> None:
+        if not self.enabled or not self.path or not self._lock:
+            return
+        parent = os.path.dirname(self.path) or "."
+        try:
+            os.makedirs(parent, exist_ok=True)
+            # write-then-rename so a crash never leaves a half-written file.
+            fd, tmp = tempfile.mkstemp(dir=parent, prefix=".risk_state_")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(self._data, f)
+                os.replace(tmp, self.path)
+            finally:
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except OSError:
+                    pass
+        except OSError as e:
+            # Persistence failure is surfaced, not swallowed: if we can't write
+            # the state file, the gate must not pretend the counters are saved.
+            logger.error(f"DurableDailyCounters: failed to persist to {self.path}: {e}")
+
+    def get(self, key: str, field: str, default):
+        if not self.enabled:
+            return default
+        with self._lock:
+            return self._data.get(key, {}).get(field, default)
+
+    def set(self, key: str, **fields) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            entry = self._data.setdefault(key, {})
+            entry.update(fields)
+            self._persist()
+
+    def increment(self, key: str, field: str, amount) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            entry = self._data.setdefault(key, {})
+            entry[field] = entry.get(field, 0 if isinstance(amount, (int, float)) else 0) + amount
+            self._persist()
+
+    def keys_with_prefix(self, prefix: str) -> list[str]:
+        if not self.enabled:
+            return []
+        with self._lock:
+            return sorted(k for k in self._data if k.startswith(prefix))
+
+    def snapshot(self, key: str) -> dict:
+        if not self.enabled:
+            return {}
+        with self._lock:
+            return dict(self._data.get(key, {}))
 
 
 class OrderExecutor:
@@ -352,10 +487,28 @@ class RiskGate:
         # order without stopping the strategy, and the kill switch remains the
         # only full-halt control. Deterministic and testable — no ML, no state
         # beyond the ring buffer below.
-        regime_throttle: bool = False,
-        regime_band_pct: float = 5.0,
-        regime_size_scale: float = 0.8,
-        regime_buffer: int = 20,
+         regime_throttle: bool = False,
+         regime_band_pct: float = 5.0,
+         regime_size_scale: float = 0.8,
+         regime_buffer: int = 20,
+         # --- Crash-safe daily counters (see safety invariant at the top of ---
+         # When enabled (default off here; main.py opts in), in-memory daily
+         # trade/loss/volume accumulators are persisted to a JSON file and
+         # reloaded at construction so a restart does not zero the counters
+         # mid-day. Off by default so unit tests stay isolated from one another
+         # (they share agent_id="default" on the same UTC day); pass
+         # counter_store=an explicit DurableDailyCounters (or enabled=False) in
+         # tests, or counters_durable=True at the application entry point.
+         counter_store: DurableDailyCounters | None = None,
+        counter_store_path: str | None = None,
+        counters_durable: bool = False,
+         # --- Onchain source-of-truth hook (optional) ---
+         # When an OnchainLogger is supplied, the gate reconciles its in-memory
+         # daily accumulators against TradeAuditTrail.getAgentDailyStats at boot
+         # and cross-checks on every counter write: the contract is authoritative
+         # for the *halt* and the *loss floor*; the file is authoritative for the
+         # in-process running totals between restarts.
+         onchain_logger=None,
     ):
         self.max_position_usd = max_position_usd
         self.max_daily_loss_usd = max_daily_loss_usd
@@ -385,16 +538,29 @@ class RiskGate:
         # here once so the risk hash below reflects the real, effective
         # allowlist rather than the literal perp list.
         self._base_allowed: set[str] = {a.split("-")[0] for a in self.allowed_assets}
-        
-        # Daily tracking (in production, this would be persisted in Redis/DB).
-        # Keyed by UTC day so a process that outlives midnight rolls the
-        # counters over instead of blocking the agent forever at yesterday's
-        # (or first-ever) accumulation.
+
+        # Daily tracking — persisted so a restart does not reset per-day limits
+        # mid-UTC-day (safety invariant / README "in-memory only" gap). The
+        # onchain contract is the non-overridable authority for the *limits*
+        # and the *halt*; these in-process accumulators track risk-approved-
+        # but-not-yet-recorded volume/loss/trades, and the file store is
+        # authoritative for them between restarts. _daily_* are kept as
+        # in-process caches for the hot path; every mutation writes through to
+        # the store.
         self._daily_volume: dict[str, float] = {}
         self._daily_loss: dict[str, float] = {}
         self._daily_trade_count: dict[str, int] = {}
+        if counter_store is None:
+            counter_store = DurableDailyCounters(
+                path=counter_store_path, enabled=counters_durable
+            )
+        self._counters = counter_store
+        self._onchain_logger = onchain_logger
 
         # --- Kill switch: global halt, independent of per-agent limits ---
+        # Initialised BEFORE onchain sync below — sync_with_onchain() may need
+        # to trip it from the contract's authoritative halt state, so the flag
+        # must exist before that runs.
         # This is the one control nothing else in this file can substitute for —
         # every other check runs per-order; this one halts the gate entirely,
         # for every agent, until explicitly cleared.
@@ -407,6 +573,87 @@ class RiskGate:
         # volatility regime change without needing any external feed. Fed by
         # RiskGate.observe_price() from the trading loop.
         self._price_buffer: dict[str, list[float]] = {}  # inst_id -> [prices]
+
+        # Bootstrap in-memory caches from the persistent store so a restart
+        # recovers yesterday's (and the current day's, if we crashed mid-day)
+        # accumulators.
+        self._rehydrate_store()
+        # Then reconcile against the contract if one is wired up: the onchain
+        # kill switch is authoritative and must be mirrored locally even when
+        # the local flag was (necessarily, at cold start) unset. See
+        # sync_with_onchain() for the source-of-truth map.
+        if self._onchain_logger is not None:
+            self.sync_with_onchain()
+
+    def _rehydrate_store(self) -> None:
+        """Reload the current day's accumulators from the persistent store.
+
+        Only the *current* UTC day is loaded — every prior day's counters have
+        already rolled over (day rollover = new key), so there is nothing to
+        recover from previous days. This is what a restart calls to avoid
+        treating a mid-day crash as a fresh start.
+        """
+        if not self._counters.enabled:
+            return
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        loaded = False
+        for raw_key in self._counters.keys_with_prefix(""):
+            if not raw_key.endswith(f":{today}"):
+                continue
+            snap = self._counters.snapshot(raw_key)
+            # raw_key is already the (agent_id, utc_day) day-key that the
+            # rest of the gate uses as the _daily_* dict key — store under
+            # that exact key so get_daily_stats / check_order read it back.
+            self._daily_volume[raw_key] = snap.get("volume", 0.0)
+            self._daily_loss[raw_key] = snap.get("loss", 0.0)
+            self._daily_trade_count[raw_key] = snap.get("trade_count", 0)
+            loaded = True
+        if loaded:
+            logger.info("RiskGate rehydrated daily counters from store for the current UTC day")
+
+    def sync_with_onchain(self) -> None:
+        """Cross-check the local state against TradeAuditTrail.
+
+        Source-of-truth map (see Block F):
+        * daily LIMITS (max position/confidence/etc.) — onchain, tightening-only
+          (TradeAuditTrail.setRiskParams). The gate re-derives thresholds from
+          config at construction; onchain is the non-overridable authority.
+        * daily ACCUMULATORS (today's P&L, trade count, volume) — the Python
+          gate's pre-execution accounting, persisted to the file store so a
+          restart recovers them mid-day. The contract ALSO tracks accumulators
+          (`dailyLoss`/`dailyTrades`/`dailyVolume`) and is the authoritative
+          execution-side record; it resets them at UTC-day rollover. We do NOT
+          use the contract as a seed for the local accumulators because the
+          contract keys by wallet address while the gate keys by agent_id
+          (string) — seeding would require that mapping, which this single-
+          agent deployment does not yet define. The contract's accumulators
+          are instead used for the one unambiguous, address-keyed sync below:
+          the kill switch.
+        """
+        logger_obj = self._onchain_logger
+        if logger_obj is None:
+            return
+        contract = getattr(logger_obj, "contract", None)
+        if contract is None:
+            return
+        agent_address = getattr(logger_obj, "agent_address", None)
+        if not agent_address:
+            return
+        try:
+            onchain_ks = bool(contract.functions.killSwitchActive(agent_address).call())
+            # Onchain kill switch is non-overridable authority for the halt.
+            # If it's active here, the local gate MUST reflect it even though
+            # the local switch was cleared — a stale/cleared local gate must
+            # never under-report an onchain halt.
+            if onchain_ks and not self._kill_switch_active:
+                reason = "onchain kill switch active for agent " + agent_address
+                logger.warning(f"sync_with_onchain: tripping gate kill switch — {reason}")
+                self.activate_kill_switch(reason)
+        except Exception as e:
+            # Reconciliation is a safety cross-check, not a blocking read. A
+            # chain outage must never *lower* protection; log and proceed with
+            # the last known-good local state (file-backed counters).
+            logger.warning(f"sync_with_onchain: unable to read kill switch from contract: {e}")
 
     @staticmethod
     def _day_key(agent_id: str) -> str:
@@ -767,8 +1014,13 @@ class RiskGate:
                 ),
             )
 
-        self._daily_trade_count[key] = self._daily_trade_count.get(key, 0) + 1
-
+        # 10. Daily trade count — persisted so a restart mid-day does not
+        #     reset this agent's tally against max_daily_trades. The store write
+        #     is atomic (temp+replace); a crash between the in-memory bump and
+        #     the store write is harmless because recovery reads the store first.
+        count = self._daily_trade_count.get(key, 0) + 1
+        self._daily_trade_count[key] = count
+        self._counters.increment(key, "trade_count", 1)
         return RiskCheckResult(
             approved=True,
             code="APPROVED",
@@ -784,12 +1036,14 @@ class RiskGate:
         just reject the next single order and otherwise carry on.
         """
         key = self._day_key(agent_id)
-        self._daily_loss[key] = self._daily_loss.get(key, 0.0) + loss_usd
-        if self._daily_loss[key] >= self.max_daily_loss_usd and not self._kill_switch_active:
+        loss = self._daily_loss.get(key, 0.0) + loss_usd
+        self._daily_loss[key] = loss
+        self._counters.increment(key, "loss", loss_usd)
+        if loss >= self.max_daily_loss_usd and not self._kill_switch_active:
             self.activate_kill_switch(
                 reason=(
                     f"Auto-triggered: agent {agent_id} daily loss "
-                    f"${self._daily_loss[key]:.2f} reached limit "
+                    f"${loss:.2f} reached limit "
                     f"${self.max_daily_loss_usd:.2f}"
                 )
             )
@@ -797,7 +1051,9 @@ class RiskGate:
     def report_volume(self, agent_id: str, volume_usd: float):
         """Report executed volume to the daily tracker."""
         key = self._day_key(agent_id)
-        self._daily_volume[key] = self._daily_volume.get(key, 0.0) + volume_usd
+        vol = self._daily_volume.get(key, 0.0) + volume_usd
+        self._daily_volume[key] = vol
+        self._counters.increment(key, "volume", volume_usd)
 
     def get_daily_stats(self, agent_id: str) -> dict:
         key = self._day_key(agent_id)

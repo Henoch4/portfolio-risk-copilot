@@ -247,7 +247,7 @@ if _STATIC_DIR.exists():
 # --- Trading Agent Setup ---
 _ALLOWED_ASSETS = ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP", "BNB-USDT-SWAP"]
 
-def _make_risk_gate() -> RiskGate:
+def _make_risk_gate(onchain_logger=None) -> RiskGate:
     return RiskGate(
         max_position_usd=float(os.getenv("MAX_POSITION_USD", "5000")),
         max_daily_loss_usd=float(os.getenv("MAX_DAILY_LOSS_USD", "500")),
@@ -259,6 +259,8 @@ def _make_risk_gate() -> RiskGate:
         regime_throttle=os.getenv("REGIME_THROTTLE", "false").lower() in ("1", "true", "yes"),
         regime_band_pct=float(os.getenv("REGIME_BAND_PCT", "5.0")),
         regime_size_scale=float(os.getenv("REGIME_SIZE_SCALE", "0.8")),
+        counters_durable=True,
+        onchain_logger=onchain_logger,
     )
 
 def _make_onchain_logger() -> OnchainLogger | None:
@@ -284,8 +286,10 @@ def _make_curator() -> CuratorAgent | None:
     return CuratorAgent(profiles_path, audit_log=_audit_log)
 
 _dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
-_risk_gate = _make_risk_gate()
+# Order matters: the onchain logger must exist before the risk gate is built,
+# so the gate can boot-strap daily counters against TradeAuditTrail at import.
 _onchain_logger = _make_onchain_logger()
+_risk_gate = _make_risk_gate(onchain_logger=_onchain_logger)
 _cli = OkxCli(OkxCliConfig(demo=not _dry_run))
 _audit_log = AuditLog(path=os.getenv("AUDIT_LOG_PATH", "audit_log.jsonl"))
 _curator = _make_curator()
