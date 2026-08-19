@@ -10,8 +10,14 @@ Two things this file does NOT do, on purpose:
   1. It never accepts or stores OKX credentials. Auth lives entirely in
      ~/.okx/config.toml (API-key mode) or the OAuth session created by
      `okx auth login` (OAuth mode) -- both managed by the CLI itself.
-  2. It never calls a write command (place/cancel/transfer/etc). Only
-     read commands are wired up, matching the ASP's read-only manifest.
+  2. It has no opinionated read-only boundary at the OkxCli layer: the
+     generic `run()` can reach any command, INCLUDING writes. The
+     execution layer (OrderExecutor in src/execution.py) uses it for
+     `trade order`, `trade cancel`, and `trade amend`. Write access is
+     controlled where it matters -- every order passes the RiskGate
+     before it is submitted, and DRY_RUN=true in prod keeps live writes
+     off until explicitly flipped. The balance/signal/status helpers
+     below stay read-only as a convenience, not as a claim of purity.
 """
 from __future__ import annotations
 

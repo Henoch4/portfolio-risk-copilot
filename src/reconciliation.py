@@ -38,6 +38,7 @@ class ReconciliationResult:
     okx_available: bool
     last_attestation: int | None
     attest_timelock: int | None
+    read_error: str | None = None
     error: str | None = None
 
 
@@ -60,24 +61,30 @@ def _vault_contract(w3):
 async def read_okx_balance(cli) -> dict[str, Any]:
     """Read the agent's OKX account balance via OkxCli.
 
-    Returns dict with keys: total_eq, details (per-ccy balances).
+    Uses `balance_all()` (the trading-account snapshot, which honors the
+    account's portfolio margin and isolated positions) rather than
+    `account_balance` — the latter returns the effective-balance view per
+    currency, which materially under-reports equity under margin.
+
+    Returns dict with keys: total_eq, usdt_eq, details (per-ccy balances).
     Returns empty dict on failure.
     """
     try:
-        raw = await cli.account_balance(ccy="USDT")
-        if isinstance(raw, dict) and "data" in raw:
-            details = raw["data"]
-            if isinstance(details, list) and details:
-                entry = details[0]
-                details_list = entry.get("details", [])
-                total_eq = float(entry.get("totalEq", 0) or 0)
-                usdt_eq = 0.0
-                for d in details_list:
-                    if d.get("ccy") == "USDT":
-                        usdt_eq = float(d.get("eq", 0) or 0)
-                        break
-                return {"total_eq": total_eq, "usdt_eq": usdt_eq, "details": details_list}
-        return {}
+        raw = await cli.balance_all()
+        if not isinstance(raw, dict):
+            return {}
+        trading = raw.get("trading")
+        if not isinstance(trading, dict):
+            return {}
+        details = trading.get("details") or []
+        total_eq = float(trading.get("totalEq", 0) or 0)
+        usdt_eq = 0.0
+        if isinstance(details, list):
+            for d in details:
+                if d.get("ccy") == "USDT":
+                    usdt_eq = float(d.get("eq", 0) or 0)
+                    break
+        return {"total_eq": total_eq, "usdt_eq": usdt_eq, "details": details}
     except Exception as e:
         logger.warning(f"OKX balance read failed: {e}")
         return {}
@@ -103,7 +110,11 @@ def read_vault_state() -> dict[str, Any]:
         }
     except Exception as e:
         logger.warning(f"Vault state read failed: {e}")
-        return {"deployed": False, "error": str(e)}
+        # The address is configured, so this is a READ failure, not an absent
+        # deployment. Keep deployed=True so callers distinguish "never wired
+        # up" from "temporarily unreachable" instead of papering over RPC
+        # outages as if the vault did not exist.
+        return {"deployed": True, "error": str(e)}
 
 
 def reconcile(
@@ -119,6 +130,17 @@ def reconcile(
     now = time.time()
     vault_deployed = vault_state.get("deployed", False)
     okx_available = bool(okx_data)
+
+    # Surface read failures instead of silently treating them as "no data":
+    # a missing vault read and an unreachable OKX API are different problems
+    # with different user-facing messaging ("not deployed" vs "temporarily
+    # unavailable", surfaced by the frontend via read_error).
+    read_error_parts = []
+    if vault_state.get("error"):
+        read_error_parts.append(f"vault: {vault_state['error']}")
+    if not okx_data:
+        read_error_parts.append("OKX balance unavailable")
+    read_error = "; ".join(read_error_parts) or None
 
     vault_total = vault_state.get("total_assets") if vault_state.get("total_assets") is not None else vault_state.get("total_assets_priced")
     pending = vault_state.get("pending_reserved")
@@ -153,4 +175,5 @@ def reconcile(
         okx_available=okx_available,
         last_attestation=last_att,
         attest_timelock=att_timelock,
+        read_error=read_error,
     )

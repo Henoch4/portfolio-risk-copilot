@@ -59,6 +59,7 @@ def _audit_contract(w3):
 
 class VaultStats(BaseModel):
     deployed: bool
+    read_error: str | None = None
     tvl: int | None = None
     total_supply: int | None = None
     share_price: int | None = None
@@ -74,6 +75,7 @@ class VaultStats(BaseModel):
 
 class VaultPosition(BaseModel):
     deployed: bool
+    read_error: str | None = None
     address: str
     share_balance: int = 0
     asset_value: int = 0
@@ -92,6 +94,7 @@ class WithdrawalRequest(BaseModel):
 
 class AuditRecent(BaseModel):
     deployed: bool
+    read_error: str | None = None
     decisions: list[dict[str, Any]] = []
     count: int = 0
 
@@ -137,7 +140,10 @@ def vault_stats():
         )
     except Exception as e:
         logger.warning(f"vault_stats read failed: {e}")
-        return VaultStats(deployed=False)
+        # RPC failure is NOT "not deployed" — the address is configured, the
+        # contract just isn't answering right now. Be honest: the UI shows
+        # this as temporarily unavailable instead of claiming no deployment.
+        return VaultStats(deployed=True, read_error=str(e))
 
 
 @router.get("/position/{address}", response_model=VaultPosition)
@@ -165,7 +171,9 @@ def vault_position(address: str):
         )
     except Exception as e:
         logger.warning(f"vault_position read failed: {e}")
-        return VaultPosition(deployed=False, address=address)
+        # Same honesty rule as vault_stats: a failed read of a configured
+        # contract is not "not deployed".
+        return VaultPosition(deployed=True, address=address, read_error=str(e))
 
 
 @router.get("/withdrawal/{request_id}", response_model=WithdrawalRequest)
@@ -225,17 +233,29 @@ def audit_recent(count: int = 10):
         start = max(0, total - count)
         decisions = []
         for i in range(start, total):
-            d = audit.functions.getDecision(i).call()
+            # TradeDecision struct field order
+            # (contracts/contracts/TradeAuditTrail.sol:16-31). Keeping the
+            # order in one place next to the unpack means an ABI change cannot
+            # silently shift a field under the API:
+            #   0 decisionId, 1 packageId, 2 agent, 3 asset, 4 signal,
+            #   5 strategy, 6 confidence, 7 entryPrice, 8 sizeUsd,
+            #   9 timestamp, 10 riskHash, 11 signature, 12 executed,
+            #   13 isShort
+            decision_id, package_id, agent, asset, signal, strategy, \
+                confidence, entry_price, size_usd, timestamp, risk_hash, \
+                signature, executed, is_short = audit.functions.getDecision(i).call()
             decisions.append({
-                "decision_id": d[0].hex() if isinstance(d[0], bytes) else str(d[0]),
-                "asset": d[3],
-                "signal": d[4],
-                "confidence": d[6],
-                "size_usd": d[7],
-                "timestamp": d[9],
-                "executed": d[11],
+                "decision_id": decision_id.hex() if isinstance(decision_id, bytes) else str(decision_id),
+                "asset": asset,
+                "signal": signal,
+                "confidence": confidence,
+                "size_usd": size_usd,
+                "timestamp": timestamp,
+                "executed": executed,
             })
         return AuditRecent(deployed=True, decisions=decisions, count=total)
     except Exception as e:
         logger.warning(f"audit_recent read failed: {e}")
-        return AuditRecent(deployed=False)
+        # Same as vault_stats/vault_position: a configured-but-unreachable
+        # audit contract is not "not deployed".
+        return AuditRecent(deployed=True, read_error=str(e))

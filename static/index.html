@@ -814,6 +814,11 @@
         const body = document.getElementById('reconBody');
         if (!body) return;
 
+        if (data.read_error) {
+          body.className = 'empty-state';
+          body.innerHTML = 'Reconciliation temporarily unavailable.<br><span class="muted" style="font-size:0.8rem;">' + escapeHtml(data.read_error) + '</span><br>This compares vault totalAssets vs OKX balance once reads recover.';
+          return;
+        }
         if (!data.vault_deployed) {
           body.className = 'empty-state';
           body.innerHTML = 'Vault not deployed.<br>Reconciliation shows vault totalAssets vs OKX balance.';
