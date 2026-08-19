@@ -118,6 +118,16 @@
     }
     .form-input:focus { border-color: var(--accent); }
     .form-input::placeholder { color: var(--text-muted); }
+
+    /* number input spinners */
+    .form-input::-webkit-inner-spin-button,
+    .form-input::-webkit-outer-spin-button {
+      opacity: 1; height: 28px;
+    }
+    .form-input::-webkit-inner-spin-button { background: var(--surface-3); border-radius: 4px; }
+    .form-input::-webkit-inner-spin-button:hover { background: var(--border); }
+    .form-input::-moz-number-spin-button { background: var(--surface-3); border-radius: 4px; }
+    .form-input::-moz-number-spin-button:hover { background: var(--border); }
     .form-hint { font-size: 0.75rem; color: var(--text-muted); margin-top: var(--space-1); }
 
     .btn {
