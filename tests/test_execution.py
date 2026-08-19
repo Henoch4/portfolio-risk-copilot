@@ -278,6 +278,94 @@ class TestRiskGate:
         assert stats["volume"] == 1500.0
 
 
+class TestDailyCounterUtcRollover:
+    """Regression: daily counters were plain in-memory dicts keyed only by
+    agent_id with no day-boundary logic — once an agent hit max_daily_trades or
+    max_daily_loss_usd it was blocked forever (or until restart), not just for
+    that day. Counters are now keyed by UTC day and roll over at midnight."""
+
+    def _gate(self):
+        return RiskGate(max_daily_trades=2)
+
+    def _order(self):
+        return OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="buy", order_type="market", size="100",
+        )
+
+    def test_counters_reset_across_utc_day_boundary(self, monkeypatch):
+        import datetime as _dt
+        import src.execution as _exec
+        gate = self._gate()
+        kwargs = dict(current_price=50000, current_price_timestamp=_fresh_ts())
+
+        gate.check_order(self._order(), "agent1", **kwargs)
+        gate.check_order(self._order(), "agent1", **kwargs)
+        assert gate.check_order(self._order(), "agent1", **kwargs).approved is False
+        assert gate.check_order(self._order(), "agent1", **kwargs).code == \
+            "DAILY_TRADE_LIMIT_EXCEEDED"
+
+        # Roll the clock past midnight UTC and re-check.
+        real_now = _dt.datetime.now(_dt.timezone.utc)
+        midnight = (real_now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    + _dt.timedelta(days=1))
+
+        class _FakeClock:
+            @staticmethod
+            def now(tz=None):
+                return midnight
+
+        monkeypatch.setattr(_exec, "datetime", _FakeClock)
+        assert gate.check_order(self._order(), "agent1", **kwargs).approved is True
+        assert gate.get_daily_stats("agent1")["trade_count"] == 1
+
+    def test_loss_counter_is_day_scoped(self, monkeypatch):
+        import datetime as _dt
+        import src.execution as _exec
+        gate = RiskGate(max_daily_loss_usd=500)
+        gate.report_loss("agent1", 400)  # under limit, no kill switch
+
+        prev_day = _dt.datetime.now(_dt.timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0) - _dt.timedelta(days=1)
+
+        class _FakeClock:
+            @staticmethod
+            def now(tz=None):
+                return prev_day
+
+        monkeypatch.setattr(_exec, "datetime", _FakeClock)
+        # On the PREVIOUS day key, no loss was reported.
+        assert gate.get_daily_stats("agent1")["loss"] == 0.0
+
+
+class TestInvalidOrderSize:
+    """Regression: a malformed order.size was coerced to 0 and silently passed
+    the position-size gate, so 'abc' or None became an approved trade. It must
+    now be rejected loudly — bad input must fail, not pass."""
+
+    def test_non_numeric_size_rejected(self):
+        gate = RiskGate()
+        for bad in ("abc", "1a.0", None):
+            order = OrderRequest(
+                inst_id="BTC-USDT-SWAP", side="buy", order_type="market", size=bad,
+            )
+            result = gate.check_order(
+                order, "agent1", current_price=50000, current_price_timestamp=_fresh_ts(),
+            )
+            assert result.approved is False
+            assert result.code == "INVALID_ORDER_SIZE"
+
+    def test_negative_size_rejected(self):
+        gate = RiskGate()
+        order = OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="buy", order_type="market", size="-100",
+        )
+        result = gate.check_order(
+            order, "agent1", current_price=50000, current_price_timestamp=_fresh_ts(),
+        )
+        assert result.approved is False
+        assert result.code == "INVALID_ORDER_SIZE"
+
+
 class TestRegimeThrottle:
 
     def test_regime_throttle_disabled_returns_full_scale(self):

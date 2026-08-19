@@ -110,3 +110,46 @@ def test_valid_market_order_reduce_only_ok():
     gate = RiskGate()
     res = _check(gate, _order("sell", "market", reduce_only=True), 100.0, FRESH, "long")
     assert res.approved is True
+
+
+@pytest.mark.parametrize("side,position", [
+    ("sell", "long"),  # sell flipping a long -> short
+    ("buy", "short"),  # buy flipping a short -> long  (was unchecked before)
+])
+def test_reduce_only_enforced_symmetrically(side, position):
+    """Regression: the reduce-only gate only guarded sell-against-long. A buy
+    order flipping an existing short into a long passed unchecked, asymmetric
+    with the docstring's 'does not allow flipping a position' guarantee."""
+    gate = RiskGate()
+    res = _check(gate, _order(side, "market", reduce_only=False), 100.0, FRESH, position)
+    assert res.approved is False
+    assert res.code == "REDUCE_ONLY_VIOLATION"
+
+
+def test_reduce_only_marked_order_ok_in_both_directions():
+    gate = RiskGate()
+    res1 = _check(gate, _order("sell", "market", reduce_only=True), 100.0, FRESH, "long")
+    res2 = _check(gate, _order("buy", "market", reduce_only=True), 100.0, FRESH, "short")
+    assert res1.approved is True
+    assert res2.approved is True
+
+
+def test_missing_confidence_logged_but_not_rejected(caplog):
+    """Regression: omitting confidence_bps silently skipped the confidence
+    floor (equal to a forgotten confidence). It is still not a rejection — the
+    gate cannot veto what it was never told — but it is now logged so the
+    pattern is visible instead of silent."""
+    gate = RiskGate(min_confidence_bps=7000)
+    import logging
+    with caplog.at_level(logging.WARNING, logger="src.execution"):
+        res = _check(gate, _order("buy", "market", confidence_bps=None), 100.0, FRESH)
+    assert res.approved is True
+    assert any("CONFIDENCE_MISSING" in r.message for r in caplog.records) or \
+        any("CONFIDENCE_MISSING" in r.getMessage() for r in caplog.records)
+
+
+def test_low_confidence_still_rejected():
+    gate = RiskGate(min_confidence_bps=7000)
+    res = _check(gate, _order("buy", "market", confidence_bps=5000), 100.0, FRESH)
+    assert res.approved is False
+    assert res.code == "CONFIDENCE_TOO_LOW"

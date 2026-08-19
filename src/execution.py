@@ -18,6 +18,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal
 
@@ -385,7 +386,10 @@ class RiskGate:
         # allowlist rather than the literal perp list.
         self._base_allowed: set[str] = {a.split("-")[0] for a in self.allowed_assets}
         
-        # Daily tracking (in production, this would be persisted in Redis/DB)
+        # Daily tracking (in production, this would be persisted in Redis/DB).
+        # Keyed by UTC day so a process that outlives midnight rolls the
+        # counters over instead of blocking the agent forever at yesterday's
+        # (or first-ever) accumulation.
         self._daily_volume: dict[str, float] = {}
         self._daily_loss: dict[str, float] = {}
         self._daily_trade_count: dict[str, int] = {}
@@ -404,9 +408,23 @@ class RiskGate:
         # RiskGate.observe_price() from the trading loop.
         self._price_buffer: dict[str, list[float]] = {}  # inst_id -> [prices]
 
+    @staticmethod
+    def _day_key(agent_id: str) -> str:
+        """UTC-day-scoped storage key for daily counters. Rolling over at
+        midnight UTC is deliberate: "daily" is defined against a fixed clock,
+        not elapsed uptime, so a restart or 23h-long process cannot reset or
+        freeze the limit mid-day."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return f"{agent_id}:{today}"
+
+    def _day_keys(self, agent_id: str) -> list[str]:
+        """All storage keys currently held for an agent across days (for
+        stats/history); the agent's current-day key is always last."""
+        prefix = f"{agent_id}:"
+        return sorted(k for k in self._daily_volume if k.startswith(prefix))
+
     def activate_kill_switch(self, reason: str) -> None:
         """Halt all order approval immediately. Requires explicit deactivation to resume."""
-        import time
         self._kill_switch_active = True
         self._kill_switch_reason = reason
         self._kill_switch_activated_at = time.time()
@@ -559,8 +577,18 @@ class RiskGate:
 
         # 2. Confidence floor — the gate enforces it even if the strategy layer
         # forgets. Skipped only when the caller provides no confidence at all
-        # (the gate cannot second-guess what it was never told).
-        if order.confidence_bps is not None and order.confidence_bps < self.min_confidence_bps:
+        # (the gate cannot second-guess what it was never told). That omission
+        # is intentionally not a rejection, but it is LOGGED — a caller that
+        # routinely ships confidence-less orders is a signal worth surfacing,
+        # not a silent pass.
+        if order.confidence_bps is None:
+            logger.warning(
+                "CONFIDENCE_MISSING: order %s (%s %s %s) has no confidence_bps; "
+                "the %d bps floor is not being enforced on it.",
+                order.client_oid, order.side, order.order_type, order.inst_id,
+                self.min_confidence_bps,
+            )
+        elif order.confidence_bps < self.min_confidence_bps:
             return RiskCheckResult(
                 approved=False,
                 code="CONFIDENCE_TOO_LOW",
@@ -571,11 +599,24 @@ class RiskGate:
                 ),
             )
 
-        # 3. Position size limit (scaled by regime throttle when active)
+        # 3. Position size limit (scaled by regime throttle when active).
+        # A malformed size is REJECTED, never laundered into a passing 0 —
+        # silently approving an order whose size we can't parse is how a
+        # bad input becomes a fat trade instead of a loud failure.
         try:
             size_usd = float(order.size)
         except (ValueError, TypeError):
-            size_usd = 0
+            return RiskCheckResult(
+                approved=False,
+                code="INVALID_ORDER_SIZE",
+                reason=f"Order size {order.size!r} is not a valid number.",
+            )
+        if size_usd < 0:
+            return RiskCheckResult(
+                approved=False,
+                code="INVALID_ORDER_SIZE",
+                reason=f"Order size {order.size!r} cannot be negative.",
+            )
 
         effective_max = self.max_position_usd * self.regime_scale(order.inst_id)
         if size_usd > effective_max:
@@ -600,19 +641,20 @@ class RiskGate:
             )
 
         # 4. Daily trade count
-        if self._daily_trade_count.get(agent_id, 0) >= self.max_daily_trades:
+        key = self._day_key(agent_id)
+        if self._daily_trade_count.get(key, 0) >= self.max_daily_trades:
             return RiskCheckResult(
                 approved=False,
                 code="DAILY_TRADE_LIMIT_EXCEEDED",
                 reason=(
                     f"Agent has already placed "
-                    f"{self._daily_trade_count.get(agent_id, 0)} "
+                    f"{self._daily_trade_count.get(key, 0)} "
                     f"trades today (max {self.max_daily_trades})"
                 ),
             )
 
         # 5. Daily loss limit
-        current_loss = self._daily_loss.get(agent_id, 0.0)
+        current_loss = self._daily_loss.get(key, 0.0)
         if current_loss >= self.max_daily_loss_usd:
             return RiskCheckResult(
                 approved=False,
@@ -668,10 +710,11 @@ class RiskGate:
                 )
 
         # 8. Reduce-only enforcement — enforced, not stubbed.
-        # A sell order that would open or increase a short, rather than reduce
-        # an existing long, must be explicitly marked reduce_only=False by the
-        # caller and is otherwise rejected here.
-        if order.side == "sell" and current_position_side == "long" and not order.reduce_only:
+        # A sell that flips a long into a short, or a buy that flips a short
+        # into a long, must be explicitly marked reduce_only=True and is
+        # otherwise rejected here. Symmetric — this gate does not allow
+        # flipping a position in either direction in a single unmarked order.
+        if current_position_side == "long" and order.side == "sell" and not order.reduce_only:
             return RiskCheckResult(
                 approved=False,
                 code="REDUCE_ONLY_VIOLATION",
@@ -679,6 +722,16 @@ class RiskGate:
                     "Sell order against an existing long position must set "
                     "reduce_only=True — this gate does not allow flipping a "
                     "position from long to short in a single unmarked order."
+                ),
+            )
+        if current_position_side == "short" and order.side == "buy" and not order.reduce_only:
+            return RiskCheckResult(
+                approved=False,
+                code="REDUCE_ONLY_VIOLATION",
+                reason=(
+                    "Buy order against an existing short position must set "
+                    "reduce_only=True — this gate does not allow flipping a "
+                    "position from short to long in a single unmarked order."
                 ),
             )
 
@@ -714,7 +767,7 @@ class RiskGate:
                 ),
             )
 
-        self._daily_trade_count[agent_id] = self._daily_trade_count.get(agent_id, 0) + 1
+        self._daily_trade_count[key] = self._daily_trade_count.get(key, 0) + 1
 
         return RiskCheckResult(
             approved=True,
@@ -730,25 +783,31 @@ class RiskGate:
         says the system should default to reducing risk under uncertainty, not
         just reject the next single order and otherwise carry on.
         """
-        self._daily_loss[agent_id] = self._daily_loss.get(agent_id, 0.0) + loss_usd
-        if self._daily_loss[agent_id] >= self.max_daily_loss_usd and not self._kill_switch_active:
+        key = self._day_key(agent_id)
+        self._daily_loss[key] = self._daily_loss.get(key, 0.0) + loss_usd
+        if self._daily_loss[key] >= self.max_daily_loss_usd and not self._kill_switch_active:
             self.activate_kill_switch(
                 reason=(
                     f"Auto-triggered: agent {agent_id} daily loss "
-                    f"${self._daily_loss[agent_id]:.2f} reached limit "
+                    f"${self._daily_loss[key]:.2f} reached limit "
                     f"${self.max_daily_loss_usd:.2f}"
                 )
             )
 
     def report_volume(self, agent_id: str, volume_usd: float):
         """Report executed volume to the daily tracker."""
-        self._daily_volume[agent_id] = self._daily_volume.get(agent_id, 0.0) + volume_usd
+        key = self._day_key(agent_id)
+        self._daily_volume[key] = self._daily_volume.get(key, 0.0) + volume_usd
 
     def get_daily_stats(self, agent_id: str) -> dict:
+        key = self._day_key(agent_id)
         return {
-            "volume": self._daily_volume.get(agent_id, 0.0),
-            "loss": self._daily_loss.get(agent_id, 0.0),
-            "trade_count": self._daily_trade_count.get(agent_id, 0),
+            "volume": self._daily_volume.get(key, 0.0),
+            "loss": self._daily_loss.get(key, 0.0),
+            "trade_count": self._daily_trade_count.get(key, 0),
+            # Informational projection only — NOT an enforced control. No code
+            # path in check_order sums volume against this; it exists so a
+            # dashboard can show "worst case gross volume" for context.
             "volume_limit": self.max_position_usd * self.max_daily_trades,
             "loss_limit": self.max_daily_loss_usd,
             "trade_count_limit": self.max_daily_trades,
@@ -756,7 +815,6 @@ class RiskGate:
 
     def compute_risk_hash(self) -> str:
         """Compute a deterministic hash of the risk parameters for onchain logging."""
-        import json
         params = {
             "max_position_usd": self.max_position_usd,
             "max_daily_loss_usd": self.max_daily_loss_usd,
