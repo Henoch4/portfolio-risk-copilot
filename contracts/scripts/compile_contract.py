@@ -23,6 +23,10 @@ CONTRACTS = {
         "path": CONTRACT_DIR / "contracts" / "TradingVault.sol",
         "via_ir": True,
     },
+    "MockUSDT": {
+        "path": CONTRACT_DIR / "contracts" / "MockUSDT.sol",
+        "via_ir": False,
+    },
 }
 
 

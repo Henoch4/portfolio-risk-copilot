@@ -87,6 +87,11 @@
   },
   {
     "inputs": [],
+    "name": "InvalidConstructorArg",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "MaxTvlExceeded",
     "type": "error"
   },

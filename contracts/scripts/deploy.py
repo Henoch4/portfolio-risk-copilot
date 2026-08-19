@@ -84,7 +84,7 @@ def _send(w3, account, contract, constructor_args, label):
     nonce = w3.eth.get_transaction_count(account.address)
     tx = Contract.constructor(*constructor_args).build_transaction({
         "chainId": CHAIN_ID,
-        "gas": 3000000,
+        "gas": 8000000,
         "gasPrice": w3.to_wei("1", "gwei"),
         "nonce": nonce,
     })

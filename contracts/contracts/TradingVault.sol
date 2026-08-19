@@ -150,6 +150,7 @@ contract TradingVault {
     error NotProposedAgent();
     error RotationTimelocked();
     error AttestationDeltaTooLarge();
+    error InvalidConstructorArg();
 
     /* ========== MODIFIERS ========== */
 
@@ -178,6 +179,15 @@ contract TradingVault {
         uint256 _attestTimelock,
         uint256 _maxAttestationDeltaBps
     ) {
+        if (address(_asset) == address(0) || _agent == address(0))
+            revert InvalidConstructorArg();
+        if (_maxAttestationDeltaBps > 10_000)
+            revert AttestationDeltaTooLarge();
+
+        uint256 _codeSize;
+        assembly { _codeSize := extcodesize(_asset) }
+        if (_codeSize == 0) revert InvalidConstructorArg();
+
         owner = msg.sender;
         agent = _agent;
         asset = _asset;

@@ -53,6 +53,8 @@ from .multi_leg import MultiLegExecutionManager
 from .audit_trail import AuditLog
 from .curator import CuratorAgent
 from .data_integrity import DataIntegrityGate
+from .vault_api import router as vault_router
+from .reconciliation import read_vault_state, read_okx_balance, reconcile
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,7 @@ ALLOW_LIVE = os.getenv("ALLOW_LIVE", "false").lower() == "true"
 _MANIFEST_PATH = pathlib.Path(__file__).resolve().parent.parent / "manifest.json"
 
 app = FastAPI(title="Portfolio Risk Copilot", version="0.1.0")
+app.include_router(vault_router)
 
 
 class _CycleWebSocketHub:
@@ -235,6 +238,10 @@ if _STATIC_DIR.exists():
     @app.get("/", include_in_schema=False)
     def dashboard():
         return FileResponse(str(_STATIC_DIR / "index.html"))
+
+    @app.get("/depositor", include_in_schema=False)
+    def depositor_page():
+        return FileResponse(str(_STATIC_DIR / "depositor.html"))
 
 
 # --- Trading Agent Setup ---
@@ -613,3 +620,80 @@ async def deactivate_kill_switch(_auth: None = Depends(_require_agent_token)):
         except Exception as e:
             result["onchain"] = {"error": str(e)}
     return result
+
+
+# --- Reconciliation (Phase 3: operator-attested NAV) ---
+
+@app.get("/api/v1/vault/reconciliation")
+async def vault_reconciliation():
+    """Read-only reconciliation snapshot: vault totalAssets vs OKX balance.
+    Operator uses this to decide whether to attest. No mutations."""
+    vault_state = read_vault_state()
+    okx_data = await read_okx_balance(_cli)
+    result = reconcile(vault_state, okx_data)
+    return asdict(result)
+
+
+@app.post("/api/v1/vault/attest")
+async def vault_attest(_auth: None = Depends(_require_agent_token)):
+    """Operator triggers attestTotalAssets on the vault contract.
+    Reads the current OKX balance, computes the suggested attestation value,
+    and sends the transaction. Requires AGENT_API_TOKEN + vault configured."""
+    vault_state = read_vault_state()
+    if not vault_state.get("deployed"):
+        raise HTTPException(503, "Vault not deployed or not configured")
+
+    okx_data = await read_okx_balance(_cli)
+    if not okx_data:
+        raise HTTPException(502, "Could not read OKX balance")
+
+    result = reconcile(vault_state, okx_data)
+    if result.suggested_attestation is None:
+        raise HTTPException(500, "Could not compute attestation value")
+
+    # Send the attestation transaction
+    rpc_url = os.getenv("XLAYER_RPC_URL", "").strip()
+    private_key = os.getenv("AGENT_WALLET_PRIVATE_KEY", "").strip()
+    vault_addr = os.getenv("VAULT_CONTRACT_ADDRESS", "").strip()
+    if not all([rpc_url, private_key, vault_addr]):
+        raise HTTPException(500, "Missing XLAYER_RPC_URL, AGENT_WALLET_PRIVATE_KEY, or VAULT_CONTRACT_ADDRESS")
+
+    try:
+        from web3 import Web3
+        from eth_account import Account
+
+        w3 = Web3(Web3.HTTPProvider(rpc_url))
+        if not w3.is_connected():
+            raise HTTPException(502, "Cannot connect to X Layer RPC")
+
+        abi = _load_abi("TradingVault") if hasattr(_load_abi, '__call__') else []
+        # Import from vault_api module
+        import pathlib
+        abi_path = pathlib.Path(__file__).resolve().parent.parent / "contracts" / "artifacts" / "TradingVault_abi.json"
+        abi = json.loads(abi_path.read_text()) if abi_path.exists() else []
+        vault = w3.eth.contract(address=vault_addr, abi=abi)
+
+        account = Account.from_key(private_key)
+        nonce = w3.eth.get_transaction_count(account.address)
+        tx = vault.functions.attestTotalAssets(result.suggested_attestation).build_transaction({
+            "chainId": int(os.getenv("XLAYER_CHAIN_ID", "1952")),
+            "gas": 300000,
+            "gasPrice": w3.to_wei("1", "gwei"),
+            "nonce": nonce,
+        })
+        signed = w3.eth.account.sign_transaction(tx, private_key)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+        return {
+            "status": "attested",
+            "suggested": result.suggested_attestation,
+            "tx_hash": tx_hash.hex(),
+            "gas_used": receipt.get("gasUsed", receipt.get("gas_used", 0)),
+            "discrepancy_usdt": result.discrepancy_usdt,
+            "okx_balance_usdt": result.okx_balance_usdt,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Attestation transaction failed: {e}")
