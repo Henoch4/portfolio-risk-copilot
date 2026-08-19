@@ -625,9 +625,9 @@ async def deactivate_kill_switch(_auth: None = Depends(_require_agent_token)):
 # --- Reconciliation (Phase 3: operator-attested NAV) ---
 
 @app.get("/api/v1/vault/reconciliation")
-async def vault_reconciliation():
-    """Read-only reconciliation snapshot: vault totalAssets vs OKX balance.
-    Operator uses this to decide whether to attest. No mutations."""
+async def vault_reconciliation(_auth: None = Depends(_require_agent_token)):
+    """Operator-only reconciliation snapshot: vault totalAssets vs OKX balance.
+    Requires agent token — leaks OKX balance and suggested attestation."""
     vault_state = read_vault_state()
     okx_data = await read_okx_balance(_cli)
     result = reconcile(vault_state, okx_data)
@@ -666,9 +666,6 @@ async def vault_attest(_auth: None = Depends(_require_agent_token)):
         if not w3.is_connected():
             raise HTTPException(502, "Cannot connect to X Layer RPC")
 
-        abi = _load_abi("TradingVault") if hasattr(_load_abi, '__call__') else []
-        # Import from vault_api module
-        import pathlib
         abi_path = pathlib.Path(__file__).resolve().parent.parent / "contracts" / "artifacts" / "TradingVault_abi.json"
         abi = json.loads(abi_path.read_text()) if abi_path.exists() else []
         vault = w3.eth.contract(address=vault_addr, abi=abi)
@@ -696,4 +693,5 @@ async def vault_attest(_auth: None = Depends(_require_agent_token)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"Attestation transaction failed: {e}")
+        logger.warning(f"vault_attest failed: {e}")
+        raise HTTPException(500, "Attestation transaction failed")

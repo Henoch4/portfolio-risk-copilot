@@ -16,6 +16,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from .contracts import load_abi as _load_abi
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/vault", tags=["vault"])
@@ -29,17 +31,6 @@ def _get_web3():
     from web3 import Web3
     rpc_url = os.getenv("XLAYER_RPC_URL", "https://xlayertestrpc.okx.com")
     return Web3(Web3.HTTPProvider(rpc_url))
-
-
-def _load_abi(name: str) -> list[dict]:
-    """Load a compiled ABI from contracts/artifacts/."""
-    path = (
-        pathlib.Path(__file__).resolve().parent.parent.parent
-        / "contracts" / "artifacts" / f"{name}_abi.json"
-    )
-    if not path.exists():
-        return []
-    return json.loads(path.read_text())
 
 
 def _vault_contract(w3):
@@ -223,6 +214,7 @@ def vault_abi():
 @router.get("/audit-recent", response_model=AuditRecent)
 def audit_recent(count: int = 10):
     """Recent on-chain decisions from TradeAuditTrail for depositor verification."""
+    count = min(count, 100)
     w3 = _get_web3()
     audit = _audit_contract(w3)
     if audit is None:

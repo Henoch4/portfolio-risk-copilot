@@ -694,8 +694,8 @@
         }
       } catch (err) {
         const body = document.getElementById('auditBody');
-        if (body) body.innerHTML = '<tr><td colspan="5" class="empty-state">Stats unavailable: ' + err.message + '</td></tr>';
-        document.getElementById('riskParamsBody').innerHTML = '<tr><td colspan="2" class="empty-state">Stats unavailable: ' + err.message + '</td></tr>';
+        if (body) body.innerHTML = '<tr><td colspan="5" class="empty-state">Stats unavailable: ' + escapeHtml(err.message) + '</td></tr>';
+        document.getElementById('riskParamsBody').innerHTML = '<tr><td colspan="2" class="empty-state">Stats unavailable: ' + escapeHtml(err.message) + '</td></tr>';
       }
     }
 
@@ -750,7 +750,7 @@
         body.innerHTML = html;
       } catch (err) {
         const body = document.getElementById('positionsBody');
-        if (body) body.innerHTML = 'Positions unavailable: ' + err.message;
+        if (body) body.innerHTML = 'Positions unavailable: ' + escapeHtml(err.message);
       }
     }
 
@@ -796,7 +796,7 @@
         body.innerHTML = html;
       } catch (err) {
         const body = document.getElementById('fundingArbBody');
-        if (body) body.innerHTML = 'Funding data unavailable: ' + err.message;
+        if (body) body.innerHTML = 'Funding data unavailable: ' + escapeHtml(err.message);
       }
     }
 
@@ -883,6 +883,10 @@
       });
       html += '</tbody></table>';
       body.innerHTML = html;
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
 
     function refreshDashboard() {

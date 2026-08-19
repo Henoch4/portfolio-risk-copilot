@@ -18,6 +18,8 @@ import time
 from dataclasses import dataclass, asdict
 from typing import Any
 
+from .contracts import load_abi as _load_abi
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,16 +45,6 @@ def _get_web3():
     from web3 import Web3
     rpc_url = os.getenv("XLAYER_RPC_URL", "https://xlayertestrpc.okx.com")
     return Web3(Web3.HTTPProvider(rpc_url))
-
-
-def _load_abi(name: str) -> list[dict]:
-    path = (
-        pathlib.Path(__file__).resolve().parent.parent
-        / "contracts" / "artifacts" / f"{name}_abi.json"
-    )
-    if not path.exists():
-        return []
-    return json.loads(path.read_text())
 
 
 def _vault_contract(w3):
@@ -128,7 +120,7 @@ def reconcile(
     vault_deployed = vault_state.get("deployed", False)
     okx_available = bool(okx_data)
 
-    vault_total = vault_state.get("total_assets") or vault_state.get("total_assets_priced")
+    vault_total = vault_state.get("total_assets") if vault_state.get("total_assets") is not None else vault_state.get("total_assets_priced")
     pending = vault_state.get("pending_reserved")
     last_att = vault_state.get("last_attestation")
     att_timelock = vault_state.get("attest_timelock")
