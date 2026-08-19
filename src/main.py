@@ -668,7 +668,7 @@ async def vault_attest(_auth: None = Depends(_require_agent_token)):
 
         abi_path = pathlib.Path(__file__).resolve().parent.parent / "contracts" / "artifacts" / "TradingVault_abi.json"
         abi = json.loads(abi_path.read_text()) if abi_path.exists() else []
-        vault = w3.eth.contract(address=vault_addr, abi=abi)
+        vault = w3.eth.contract(address=w3.to_checksum_address(vault_addr), abi=abi)
 
         account = Account.from_key(private_key)
         nonce = w3.eth.get_transaction_count(account.address)
