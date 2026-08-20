@@ -120,9 +120,7 @@ npx hardhat run scripts/deploy.js --network xltestnet
 
 - [x] AI element: Multi-strategy signal generation + ensemble voting
 - [x] X Layer: Contract deployed, uses native USDC
-- [x] Dedicated X account: [@AuditTrailTrader](https://twitter.com/AuditTrailTrader)
-- [x] Submission post: Posts with tag @XLayerOfficial
-- [ ] Google Form: https://docs.google.com/forms/d/e/1FAIpQLSfgU_3zcXdxK0GJQxj33QeUWdEcAaYnieVe9p5cFDb2JFQa4Q/viewform
+- [x] Dedicated X account: [@AuditTrailTrade](https://twitter.com/AuditTrailTrade)
 
 ## Files
 
