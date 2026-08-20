@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AuditTrail Trader — Wall Street risk rules, enforced onchain</title>
+<meta name="description" content="AuditTrail Trader runs mean reversion, momentum and funding rate signals through a risk gate it cannot override, then writes every approved decision to X Layer before a single order reaches OKX.">
+<meta name="theme-color" content="#F1F0EB">
+<meta property="og:title" content="AuditTrail Trader — Wall Street risk rules, enforced onchain">
+<meta property="og:description" content="A non overridable risk gate, an onchain audit trail, and three independent signal strategies. Deployed on X Layer testnet for the OKX Build X AI Season hackathon.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%2315171A'/%3E%3Crect x='4' y='4' width='24' height='24' rx='7' fill='none' stroke='%23F1F0EB' stroke-width='2.1'/%3E%3Cpath d='M10 17 14.2 21.2 23 11' fill='none' stroke='%23F1F0EB' stroke-width='2.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"AuditTrail Trader","url":"https://audittrail-trader.vercel.app","description":"Wall Street risk rules, enforced onchain"}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#F1F0EB;--bg-soft:#EDEAE1;--surface:#FFFFFF;
+  --ink:#15171A;--ink-soft:#5B5D62;--ink-faint:#8B8D91;--border:#E3E0D6;
+  --accent:#3B5FE0;--accent-dim:#E9EDFC;
+  --navy:#245C8C;--navy-ink:#EAF2FA;
+  --mint:#6FE0A6;--mint-ink:#0B2E1D;
+  --tan:#EEE2C8;--tan-ink:#241C0C;
+  --card-ink:#15171A;--card-ink-ink:#F1F0EB;
+  --lav:#D9D2F6;--lav-ink:#241C42;
+  --b-pink:#F3B9BE;--b-orange:#E8791F;--b-white:#FBFAF7;--b-blue:#3E6FF0;
+  --b-green:#52C48A;--b-purple:#C9BFF5;--b-sky:#79C7E8;--b-gold:#F0C264;
+  --ease:cubic-bezier(0.32,0.72,0,1);
+  --spring:cubic-bezier(0.34,1.56,0.64,1);
+  --sp-100:8px;--sp-200:12px;--sp-300:16px;--sp-400:24px;--sp-500:40px;
+  --sp-600:48px;--sp-700:64px;--sp-800:80px;--sp-900:96px;
+}
+*{box-sizing:border-box;min-width:0;}
+html{scroll-behavior:smooth;}
+html,body{overflow-x:hidden;width:100%;}
+img,svg:not(.deco){max-width:100%;}
+@media(prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto;}
+  *{animation-duration:0.01ms!important;animation-iteration-count:1!important;
+    transition-duration:0.01ms!important;scroll-behavior:auto!important;}
+}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:'Manrope',system-ui,sans-serif;-webkit-font-smoothing:antialiased;line-height:1.5;}
+.mono{font-family:'Geist Mono',ui-monospace,'SF Mono',monospace;}
+a{color:inherit;}
+h1,h2,h3{font-weight:700;margin:0;}
+h2,h3{text-wrap:balance;}
+p{text-wrap:pretty;margin:0;}
+.container{max-width:1120px;margin:0 auto;padding:0 var(--sp-400);}
+.skip-link{position:absolute;left:-999px;top:0;background:var(--ink);color:var(--bg);
+  padding:var(--sp-200) var(--sp-300);border-radius:8px;z-index:200;font-weight:600;}
+.skip-link:focus{left:var(--sp-400);top:var(--sp-400);}
+*:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px;}
+@media print{
+  .announce,.nav,.nav-modal,.final-cta,footer{display:none;}
+  body{background:white;color:black;}
+}
+
+.reveal{opacity:0;transform:translateY(48px);filter:blur(4px);
+  transition:opacity 800ms var(--ease),transform 800ms var(--ease),filter 800ms var(--ease);}
+.reveal.in{opacity:1;transform:translateY(0);filter:blur(0);}
+.hero-anim{opacity:0;transform:translateY(24px);animation:hero-in 700ms var(--ease) forwards;}
+.hero-anim.d1{animation-delay:80ms;}
+.hero-anim.d2{animation-delay:180ms;}
+.hero-anim.d3{animation-delay:300ms;}
+.hero-anim.d4{animation-delay:420ms;}
+.hero-anim.d5{animation-delay:540ms;}
+@keyframes hero-in{to{opacity:1;transform:translateY(0);}}
+
+.announce{background:var(--accent-dim);border-bottom:1px solid var(--border);
+  padding:10px var(--sp-400);text-align:center;font-size:0.82rem;position:relative;
+  transition:transform 400ms var(--ease),opacity 400ms var(--ease),
+    padding 400ms var(--ease),max-height 400ms var(--ease);
+  max-height:60px;overflow:hidden;transform-origin:top;}
+.announce b{font-family:'Geist Mono',monospace;letter-spacing:0.04em;color:var(--accent);margin-right:6px;}
+.announce a{color:var(--accent);font-weight:600;text-decoration:none;border-bottom:1px solid currentColor;}
+.announce-close{position:absolute;right:14px;top:50%;transform:translateY(-50%);background:none;border:none;
+  cursor:pointer;color:var(--ink-faint);font-size:1rem;line-height:1;padding:4px;}
+.announce-close:hover{color:var(--ink);}
+.announce.hidden{transform:scaleY(0);opacity:0;padding-top:0;padding-bottom:0;max-height:0;border-color:transparent;}
+
+.nav{display:flex;align-items:center;justify-content:space-between;
+  padding:var(--sp-300) 0;border-bottom:1px solid var(--border);}
+.nav-brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:1rem;white-space:nowrap;}
+.nav-brand .beta{font-family:'Geist Mono',monospace;font-size:0.62rem;background:var(--ink);
+  color:var(--bg);padding:2px 7px;border-radius:999px;letter-spacing:0.04em;}
+.nav-links{display:flex;align-items:center;gap:var(--sp-500);font-size:0.9rem;}
+.nav-links a{text-decoration:none;color:var(--ink-soft);transition:color 250ms var(--ease);}
+.nav-links a:hover{color:var(--ink);}
+.nav-right{display:flex;align-items:center;gap:12px;}
+.btn-pill{display:inline-flex;align-items:center;gap:8px;background:var(--ink);color:var(--bg);
+  border:none;border-radius:999px;padding:11px 20px;font-weight:600;font-size:0.9rem;
+  font-family:inherit;cursor:pointer;text-decoration:none;
+  transition:transform 250ms var(--ease),background 250ms var(--ease),box-shadow 250ms var(--ease);}
+.btn-pill:hover{transform:translateY(-1px);background:#2B2D31;box-shadow:0 4px 12px rgba(21,23,26,0.15);}
+.btn-pill:active{transform:scale(0.98);}
+.btn-pill.ghost{background:var(--surface);color:var(--ink);border:1px solid var(--border);}
+.btn-pill.ghost:hover{background:var(--bg-soft);}
+.nav-toggle{display:none;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);
+  border-radius:999px;padding:9px 16px;font-weight:600;font-size:0.88rem;cursor:pointer;font-family:inherit;color:var(--ink);}
+@media(max-width:840px){.nav-links{display:none;}.nav-right .btn-pill.hero-only{display:none;}.nav-toggle{display:flex;}}
+
+.nav-modal{position:fixed;inset:0;z-index:99;background:rgba(241,240,235,0.92);backdrop-filter:blur(12px);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--sp-500);
+  opacity:0;pointer-events:none;transition:opacity 450ms var(--ease);}
+.nav-modal.open{opacity:1;pointer-events:auto;}
+.nav-modal a{font-size:1.6rem;font-weight:700;text-decoration:none;color:var(--ink);
+  transform:translateY(32px);opacity:0;transition:transform 550ms var(--ease),opacity 550ms var(--ease);}
+.nav-modal.open a{transform:translateY(0);opacity:1;}
+.nav-modal.open a:nth-child(1){transition-delay:80ms;}
+.nav-modal.open a:nth-child(2){transition-delay:130ms;}
+.nav-modal.open a:nth-child(3){transition-delay:180ms;}
+.nav-modal.open a:nth-child(4){transition-delay:230ms;}
+.nav-modal.open a:nth-child(5){transition-delay:280ms;}
+.nav-modal-close{position:absolute;top:24px;right:24px;background:var(--surface);border:1px solid var(--border);
+  border-radius:999px;width:40px;height:40px;font-size:1.1rem;cursor:pointer;}
+
+.hero{padding:var(--sp-800) 0 var(--sp-700);position:relative;}
+.hero-stack{position:absolute;left:-6px;top:8px;width:150px;height:150px;pointer-events:none;}
+@media(max-width:900px){.hero-stack{display:none;}}
+.stack-card{position:absolute;border-radius:12px;box-shadow:0 10px 24px rgba(21,23,26,0.12);}
+.stack-card:nth-child(1){animation:stack-float 5s ease-in-out infinite;}
+.stack-card:nth-child(2){animation:stack-float 5s ease-in-out infinite 0.7s;}
+.stack-card:nth-child(3){animation:stack-float 5s ease-in-out infinite 1.4s;}
+@keyframes stack-float{0%,100%{transform:translateY(0) rotate(var(--r,0deg));}
+  50%{transform:translateY(-8px) rotate(var(--r,0deg));}}
+
+.eyebrow-pill{display:inline-flex;align-items:center;gap:8px;background:var(--accent-dim);color:var(--accent);
+  font-family:'Geist Mono',monospace;font-size:0.72rem;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;
+  border-radius:999px;padding:7px 14px 7px 12px;margin-bottom:var(--sp-500);text-decoration:none;}
+.eyebrow-pill svg{width:14px;height:14px;}
+.hero h1{font-size:clamp(2.1rem,5.4vw,3.6rem);line-height:1.12;max-width:760px;color:var(--ink);}
+.hero h1 .icon-inline{display:inline-flex;vertical-align:-6px;margin:0 2px;}
+.hero h1 .mono-emph{font-family:'Geist Mono',monospace;font-weight:700;letter-spacing:-0.01em;}
+.hero .sub{max-width:620px;color:var(--ink-soft);font-size:1.08rem;margin-top:var(--sp-400);}
+.hero-actions{display:flex;align-items:center;gap:var(--sp-400);margin-top:var(--sp-500);flex-wrap:wrap;}
+.link-underline{color:var(--ink);text-decoration:none;font-weight:600;font-size:0.92rem;
+  border-bottom:1px solid var(--ink-faint);padding-bottom:2px;transition:border-color 250ms var(--ease);}
+.link-underline:hover{border-color:var(--ink);}
+.proof-line{margin-top:var(--sp-600);display:flex;flex-wrap:wrap;gap:var(--sp-500) var(--sp-500);
+  color:var(--ink-faint);font-size:0.78rem;font-family:'Geist Mono',monospace;}
+.proof-line b{color:var(--ink);}
+
+section{padding:var(--sp-800) 0;}
+@media(max-width:640px){section{padding:var(--sp-600) 0;}}
+.section-eyebrow{font-family:'Geist Mono',monospace;font-size:0.72rem;font-weight:600;
+  letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:var(--sp-200);}
+.section-head h2{font-size:clamp(1.6rem,3.2vw,2.1rem);}
+.section-head{margin-bottom:var(--sp-600);}
+
+.path-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-400);}
+.path-grid .full{grid-column:1/-1;}
+@media(max-width:760px){.path-grid{grid-template-columns:1fr;}}
+.path-card{border-radius:20px;padding:var(--sp-500);display:flex;flex-direction:column;min-height:340px;
+  position:relative;overflow:hidden;transition:transform 400ms var(--ease),box-shadow 400ms var(--ease);}
+.path-card:hover{transform:translateY(-6px);box-shadow:0 16px 40px rgba(0,0,0,0.12);}
+.path-card .ruled{position:absolute;inset:var(--sp-400) var(--sp-400) auto var(--sp-400);height:130px;
+  background-image:repeating-linear-gradient(to bottom,currentcolor 0,currentcolor 1px,transparent 1px,transparent 12px);
+  opacity:0.1;mask-image:linear-gradient(to bottom,black 40%,transparent);
+  -webkit-mask-image:linear-gradient(to bottom,black 40%,transparent);}
+.path-card-body{position:relative;margin-top:auto;}
+.path-card .badge-soon{position:absolute;top:0;right:0;background:var(--surface);color:var(--ink);
+  font-size:0.78rem;font-weight:600;padding:6px 14px;border-radius:999px;}
+.path-eyebrow{font-family:'Geist Mono',monospace;font-size:0.68rem;letter-spacing:0.06em;
+  text-transform:uppercase;opacity:0.75;margin-bottom:10px;}
+.path-title{font-family:'Geist Mono',monospace;font-weight:700;font-size:1.5rem;line-height:1.15;margin-bottom:14px;}
+.path-list{list-style:none;margin:0 0 var(--sp-300);padding:0;display:flex;flex-direction:column;gap:8px;font-size:0.88rem;}
+.path-list li{display:flex;gap:8px;opacity:0.92;}
+.path-list li::before{content:"+";font-weight:700;opacity:0.6;}
+.path-stats{font-family:'Geist Mono',monospace;font-size:0.72rem;opacity:0.7;margin-bottom:var(--sp-400);letter-spacing:0.02em;}
+.path-cta{display:flex;align-items:center;gap:8px;font-weight:700;font-size:0.92rem;text-decoration:none;color:inherit;}
+.path-cta svg{width:16px;height:16px;transition:transform 300ms var(--ease);}
+.path-card:hover .path-cta svg{transform:translateX(3px);}
+.pc-navy{background:var(--navy);color:var(--navy-ink);}
+.pc-mint{background:var(--mint);color:var(--mint-ink);}
+.pc-tan{background:var(--tan);color:var(--tan-ink);}
+.pc-ink{background:var(--card-ink);color:var(--card-ink-ink);}
+.pc-lav{background:var(--lav);color:var(--lav-ink);}
+.pc-lav .path-title{font-size:1.7rem;}
+
+.manifesto{background:linear-gradient(180deg,var(--bg) 0%,#F5EFE2 60%,var(--bg) 100%);}
+.manifesto-inner{max-width:640px;display:flex;flex-direction:column;gap:var(--sp-400);}
+.manifesto p{color:var(--ink-soft);font-size:1.02rem;line-height:1.6;}
+.manifesto p b{color:var(--ink);font-weight:700;}
+.manifesto-links{display:flex;gap:var(--sp-400);margin-top:var(--sp-200);}
+.manifesto-handle{margin-top:var(--sp-500);font-family:'Geist Mono',monospace;color:var(--ink-faint);font-size:0.95rem;}
+.manifesto-handle a{color:inherit;text-decoration:none;border-bottom:1px solid var(--border);}
+
+.binder-wrap{display:flex;justify-content:center;}
+.binder{position:relative;width:100%;max-width:520px;background:#B08355;
+  background-image:radial-gradient(circle at 1px 1px,rgba(0,0,0,0.06) 1px,transparent 0);
+  background-size:5px 5px;border-radius:18px 18px 4px 22px;padding:var(--sp-500) var(--sp-500) var(--sp-700);
+  box-shadow:0 24px 48px rgba(38,26,13,0.22);}
+.binder::after{content:"";position:absolute;left:0;bottom:-22px;width:64px;height:44px;background:#9C7048;
+  border-radius:0 0 20px 20px;}
+.binder-row{display:flex;align-items:flex-start;gap:16px;padding:14px 0;border-bottom:1px solid rgba(0,0,0,0.08);
+  opacity:0;transform:translateX(-16px);transition:opacity 500ms var(--ease),transform 500ms var(--ease);}
+.binder-row.in{opacity:1;transform:translateX(0);}
+.binder-row:nth-child(2).in{transition-delay:80ms;}
+.binder-row:nth-child(3).in{transition-delay:160ms;}
+.binder-row:nth-child(4).in{transition-delay:240ms;}
+.binder-row:nth-child(5).in{transition-delay:320ms;}
+.binder-row:nth-child(6).in{transition-delay:400ms;}
+.binder-row:last-of-type{border-bottom:none;}
+.binder-swatch{width:44px;height:44px;border-radius:9px;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  box-shadow:0 4px 10px rgba(0,0,0,0.15);}
+.binder-swatch svg{width:20px;height:20px;}
+.binder-num{font-family:'Geist Mono',monospace;font-weight:700;font-size:1.1rem;color:rgba(255,255,255,0.75);min-width:26px;}
+.binder-title{font-weight:700;color:#211405;font-size:1rem;}
+.binder-sub{font-size:0.82rem;color:rgba(33,20,5,0.65);font-family:'Geist Mono',monospace;margin-top:2px;}
+.binder-caption{position:absolute;bottom:var(--sp-400);right:var(--sp-500);text-align:right;
+  font-family:'Geist Mono',monospace;font-size:0.68rem;letter-spacing:0.06em;text-transform:uppercase;
+  color:rgba(33,20,5,0.55);border-top:1px dashed rgba(33,20,5,0.3);padding-top:6px;}
+
+.bento{display:grid;grid-template-columns:repeat(2,1fr);gap:var(--sp-400);}
+@media(max-width:640px){.bento{grid-template-columns:1fr;}}
+.bento-card{border-radius:18px;padding:var(--sp-400);min-height:190px;display:flex;flex-direction:column;
+  text-decoration:none;color:inherit;transition:transform 350ms var(--ease),box-shadow 350ms var(--ease);}
+.bento-card:hover{transform:translateY(-3px);box-shadow:0 12px 32px rgba(0,0,0,0.1);}
+.bento-top{display:flex;justify-content:space-between;align-items:flex-start;}
+.bento-num{font-family:'Geist Mono',monospace;font-weight:700;font-size:1.9rem;}
+.bento-tag{font-family:'Geist Mono',monospace;font-size:0.66rem;letter-spacing:0.05em;text-transform:uppercase;
+  text-align:right;opacity:0.75;max-width:110px;line-height:1.3;}
+.bento-bottom{margin-top:auto;display:flex;justify-content:space-between;align-items:flex-end;gap:10px;}
+.bento-bottom h3{font-size:1.15rem;font-weight:700;}
+.bento-bottom p{font-size:0.82rem;opacity:0.75;margin-top:2px;}
+.bento-arrow{width:34px;height:34px;border-radius:999px;background:rgba(0,0,0,0.08);display:flex;
+  align-items:center;justify-content:center;flex-shrink:0;transition:transform 300ms var(--ease);}
+.bento-card:hover .bento-arrow{transform:translateX(2px);}
+.bn-1{background:var(--b-pink);color:#3A0D12;}
+.bn-2{background:var(--b-orange);color:#2B1000;}
+.bn-3{background:var(--b-white);color:var(--ink);border:1px solid var(--border);}
+.bn-3 .bento-arrow{background:rgba(0,0,0,0.06);}
+.bn-4{background:var(--b-blue);color:#F1F4FF;}
+.bn-4 .bento-arrow{background:rgba(255,255,255,0.22);}
+.bn-5{background:var(--b-green);color:#08281A;}
+.bn-6{background:var(--b-purple);color:#221A44;}
+.bn-7{background:var(--b-sky);color:#062232;}
+.bn-8{background:var(--b-gold);color:#2E2100;}
+
+.fee-wrap{max-width:640px;}
+.fee-note{font-family:'Geist Mono',monospace;font-size:0.72rem;letter-spacing:0.05em;text-transform:uppercase;
+  color:var(--ink-faint);margin-bottom:var(--sp-300);}
+.fee-card{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:var(--sp-500);}
+.fee-card+.fee-card{margin-top:var(--sp-300);}
+.fee-top{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;}
+.fee-price{font-size:2.4rem;font-weight:700;font-family:'Geist Mono',monospace;}
+.fee-price.pending{font-size:1.6rem;color:var(--ink-faint);}
+.fee-unit{color:var(--ink-faint);font-size:0.9rem;}
+.fee-desc{color:var(--ink-soft);margin-top:var(--sp-300);font-size:0.95rem;}
+.fee-cta{display:flex;justify-content:space-between;align-items:center;margin-top:var(--sp-400);
+  padding-top:var(--sp-400);border-top:1px solid var(--border);}
+.fee-cta .link-underline{font-size:0.88rem;}
+.fee-soon-badge{background:var(--bg-soft);color:var(--ink-soft);font-size:0.75rem;font-weight:600;
+  padding:4px 12px;border-radius:999px;}
+
+.cred{position:relative;}
+.cred-copy{max-width:600px;}
+.cred-copy p{color:var(--ink-soft);font-size:1.02rem;margin-top:var(--sp-300);}
+.cred-actions{display:flex;gap:var(--sp-300);margin-top:var(--sp-500);flex-wrap:wrap;}
+.mini-ledger{margin-top:var(--sp-700);position:relative;padding:var(--sp-500) 0;}
+.mini-ledger-grid{position:absolute;inset:0;border:1px solid var(--border);border-radius:20px;
+  background-image:
+    linear-gradient(var(--border) 1px,transparent 1px),
+    linear-gradient(90deg,var(--border) 1px,transparent 1px);
+  background-size:20px 20px;}
+.mini-cards{position:relative;display:grid;grid-template-columns:repeat(3,1fr);gap:var(--sp-300);padding:var(--sp-500);}
+@media(max-width:760px){.mini-cards{grid-template-columns:1fr;}}
+.mini-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:var(--sp-300);
+  box-shadow:0 8px 20px rgba(21,23,26,0.06);}
+.mini-card-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
+.mini-pair{font-family:'Geist Mono',monospace;font-weight:700;font-size:0.85rem;}
+.mini-status{font-size:0.66rem;font-weight:700;padding:3px 9px;border-radius:999px;font-family:'Geist Mono',monospace;}
+.mini-status.ok{background:#E4F7EC;color:#0B7A3E;}
+.mini-status.no{background:#FBE7E7;color:#C23A3A;}
+.mini-status.ok::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;
+  background:#0B7A3E;margin-right:5px;animation:pulse 2s ease-in-out infinite;}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.4;transform:scale(0.8);}}
+.mini-detail{font-size:0.78rem;color:var(--ink-soft);}
+.mini-hash{font-family:'Geist Mono',monospace;font-size:0.7rem;color:var(--ink-faint);margin-top:8px;}
+
+.faq-list{max-width:760px;}
+.faq-item{border-top:1px solid var(--border);}
+.faq-item:last-child{border-bottom:1px solid var(--border);}
+.faq-q{width:100%;text-align:left;background:none;border:none;color:var(--ink);font-family:inherit;
+  display:flex;justify-content:space-between;align-items:center;gap:var(--sp-300);
+  padding:22px 4px;font-size:1rem;font-weight:600;cursor:pointer;}
+.faq-q .chev{flex-shrink:0;width:18px;height:18px;transition:transform 350ms var(--spring);color:var(--ink-faint);}
+.faq-item.open .chev{transform:rotate(180deg);color:var(--ink);}
+.faq-a{max-height:0;overflow:hidden;transition:max-height 450ms var(--ease);}
+.faq-a p{padding:0 4px 22px;color:var(--ink-soft);font-size:0.94rem;max-width:640px;}
+
+.final-cta{background:var(--ink);color:var(--bg);border-radius:24px;padding:var(--sp-800) var(--sp-500);text-align:center;}
+.final-cta h2{font-size:clamp(1.6rem,3.8vw,2.3rem);max-width:560px;margin:0 auto;color:#fff;}
+.final-cta p{color:rgba(241,240,235,0.66);max-width:480px;margin:var(--sp-300) auto 0;}
+.waitlist-form{display:flex;gap:10px;max-width:420px;margin:var(--sp-500) auto 0;flex-wrap:wrap;justify-content:center;}
+.waitlist-form input{flex:1;min-width:220px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);
+  border-radius:10px;color:#fff;padding:12px 16px;font-family:inherit;font-size:0.92rem;}
+.waitlist-form input::placeholder{color:rgba(241,240,235,0.4);}
+.waitlist-form input[aria-invalid="true"]{border-color:#F0A5A5;}
+.waitlist-form .btn-pill{background:var(--bg);color:var(--ink);}
+.waitlist-form .btn-pill:hover{background:#fff;}
+.form-msg{margin-top:var(--sp-300);font-size:0.85rem;min-height:20px;}
+.form-msg.err{color:#F5A9A9;}
+.form-msg.ok{color:#9BE3B8;}
+.form-msg.ok::before{content:'\2713';display:inline-block;margin-right:6px;
+  animation:check-pop 400ms var(--spring);}
+@keyframes check-pop{0%{transform:scale(0) rotate(-45deg);opacity:0;}
+  100%{transform:scale(1) rotate(0);opacity:1;}}
+.final-note{margin-top:var(--sp-400);color:rgba(241,240,235,0.4);font-size:0.78rem;font-family:'Geist Mono',monospace;}
+
+footer{border-top:1px solid var(--border);padding:var(--sp-700) 0 var(--sp-500);}
+.footer-grid{display:flex;justify-content:space-between;flex-wrap:wrap;gap:var(--sp-500);}
+.footer-brand{max-width:300px;}
+.footer-brand .nav-brand{margin-bottom:var(--sp-300);}
+.footer-brand p{color:var(--ink-faint);font-size:0.85rem;}
+.footer-cols{display:flex;gap:var(--sp-700);flex-wrap:wrap;}
+.footer-col h4{font-family:'Geist Mono',monospace;font-size:0.72rem;text-transform:uppercase;
+  letter-spacing:0.05em;color:var(--ink-faint);margin-bottom:var(--sp-300);font-weight:600;}
+.footer-col a,.footer-col span{display:block;color:var(--ink-soft);text-decoration:none;font-size:0.88rem;margin-bottom:10px;}
+.footer-col a:hover{color:var(--ink);}
+.footer-col .soon{color:var(--ink-faint);cursor:default;}
+.footer-bottom{margin-top:var(--sp-700);padding-top:var(--sp-400);border-top:1px solid var(--border);
+  display:flex;justify-content:space-between;flex-wrap:wrap;gap:var(--sp-300);color:var(--ink-faint);
+  font-size:0.78rem;font-family:'Geist Mono',monospace;}
+
+.back-to-top{position:fixed;bottom:32px;right:32px;width:44px;height:44px;border-radius:999px;
+  background:var(--ink);color:var(--bg);border:none;cursor:pointer;font-size:1.1rem;
+  display:flex;align-items:center;justify-content:center;
+  opacity:0;transform:translateY(12px);transition:opacity 300ms var(--ease),transform 300ms var(--ease);
+  box-shadow:0 4px 16px rgba(21,23,26,0.2);z-index:50;}
+.back-to-top.visible{opacity:1;transform:translateY(0);}
+.back-to-top:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(21,23,26,0.3);}
+</style>
+</head>
+<body>
+<a href="#main" class="skip-link">Skip to content</a>
+
+<div class="announce" id="announce">
+  <span><b>NEW</b> The depositor vault design just shipped. <a href="#vault">Read how it works &rarr;</a></span>
+  <button class="announce-close" id="announceClose" aria-label="Dismiss announcement">&times;</button>
+</div>
+
+<div class="container">
+  <nav class="nav">
+    <div class="nav-brand">
+      <svg width="20" height="20" viewBox="0 0 32 32" fill="none"><rect x="3" y="3" width="26" height="26" rx="8" stroke="var(--ink)" stroke-width="2.1"/><path d="M10 17 14.2 21.2 23 11" stroke="var(--ink)" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      AuditTrail Trader <span class="beta">TESTNET</span>
+    </div>
+    <div class="nav-links">
+      <a href="#paths">Entry points</a>
+      <a href="#binder">Governance</a>
+      <a href="#fee">Fee</a>
+      <a href="#faq">FAQ</a>
+    </div>
+    <div class="nav-right">
+      <a class="btn-pill ghost hero-only" href="https://github.com/Henoch4/portfolio-risk-copilot" target="_blank" rel="noopener">GitHub</a>
+      <a class="btn-pill hero-only" href="/" style="text-decoration:none;">Open dashboard</a>
+      <button class="nav-toggle" id="navToggle" aria-expanded="false" aria-controls="navModal">
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none"><path d="M0 1h15M0 5.5h15M0 10h15" stroke="currentColor" stroke-width="1.4"/></svg>
+        Menu
+      </button>
+    </div>
+  </nav>
+</div>
+
+<div class="nav-modal" id="navModal">
+  <button class="nav-modal-close" id="navModalClose" aria-label="Close menu">&times;</button>
+  <a href="#paths" data-close>Entry points</a>
+  <a href="#binder" data-close>Governance</a>
+  <a href="#fee" data-close>Fee</a>
+  <a href="#faq" data-close>FAQ</a>
+  <a href="/" data-close>Open dashboard</a>
+</div>
+
+<main id="main">
+
+<header class="hero">
+  <div class="container">
+    <div class="hero-stack" aria-hidden="true">
+      <div class="stack-card" style="width:96px;height:120px;background:#245C8C;top:38px;left:34px;--r:9deg;"></div>
+      <div class="stack-card" style="width:96px;height:120px;background:#EEE2C8;top:22px;left:14px;--r:-6deg;"></div>
+      <div class="stack-card" style="width:96px;height:120px;background:#FFFFFF;border:1px solid #E3E0D6;top:6px;left:0;--r:2deg;display:flex;align-items:center;justify-content:center;">
+        <svg width="34" height="34" viewBox="0 0 32 32" fill="none"><rect x="3" y="3" width="26" height="26" rx="8" stroke="#15171A" stroke-width="2"/><path d="M10 17 14.2 21.2 23 11" stroke="#15171A" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+    </div>
+
+    <a class="eyebrow-pill hero-anim d1" href="#vault">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      New &middot; Vault waitlist is open
+    </a>
+    <h1 class="hero-anim d2">Everything a <span class="icon-inline"><svg width="0.85em" height="0.85em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="vertical-align:-0.12em;"><path d="M12 3 4 6.5v5c0 5 3.4 8.5 8 9.5 4.6-1 8-4.5 8-9.5v-5L12 3Z"/></svg></span> Wall Street risk desk knows.<br><span class="mono-emph">Enforced onchain.</span></h1>
+    <p class="sub hero-anim d3">AuditTrail Trader runs mean reversion, momentum and funding rate signals through a risk gate it cannot override, then writes every approved decision to X Layer before a single order reaches OKX.</p>
+    <div class="hero-actions hero-anim d4">
+      <a class="btn-pill" href="#waitlist">Join the vault waitlist</a>
+      <a class="link-underline" href="#paths">See where to start &rarr;</a>
+    </div>
+    <div class="proof-line hero-anim d5">
+      <span><b>349</b> offline tests</span>
+      <span>X Layer testnet &middot; <b>chain 1952</b></span>
+      <span>Risk gate: <b>non&#8209;overridable</b></span>
+    </div>
+  </div>
+</header>
+
+<section id="paths">
+  <div class="container">
+    <div class="section-head reveal">
+      <div class="section-eyebrow">Pick your entry point</div>
+      <h2>Choose what you want to see first</h2>
+    </div>
+    <div class="path-grid">
+      <div class="path-card pc-navy reveal">
+        <div class="ruled" aria-hidden="true"></div>
+        <div class="path-card-body">
+          <div class="path-eyebrow">Control layer</div>
+          <div class="path-title">Risk Gate</div>
+          <ul class="path-list">
+            <li>Position, leverage and daily loss caps the AI cannot edit</li>
+            <li>Fat finger and price collar checks on every order</li>
+            <li>Kill switch survives a process restart, onchain</li>
+          </ul>
+          <div class="path-stats">6 HARD LIMITS &middot; 20 RISK GATE TESTS</div>
+          <a class="path-cta" href="#binder">View parameters <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+        </div>
+      </div>
+
+      <div class="path-card pc-mint reveal">
+        <div class="ruled" aria-hidden="true"></div>
+        <div class="path-card-body">
+          <div class="path-eyebrow">Decision layer</div>
+          <div class="path-title">Signal Engine</div>
+          <ul class="path-list">
+            <li>Mean reversion, momentum and funding rate, run independently</li>
+            <li>Weighted ensemble vote, not a single model's opinion</li>
+            <li>No trade below 70% confidence</li>
+          </ul>
+          <div class="path-stats">3 STRATEGIES &middot; 15 SIGNAL TESTS</div>
+          <a class="path-cta" href="https://github.com/Henoch4/portfolio-risk-copilot/blob/main/src/signals.py" target="_blank" rel="noopener">View signals.py <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+        </div>
+      </div>
+
+      <div class="path-card pc-tan reveal">
+        <div class="ruled" aria-hidden="true"></div>
+        <div class="path-card-body">
+          <div class="path-eyebrow">Record layer</div>
+          <div class="path-title">Audit Trail</div>
+          <ul class="path-list">
+            <li>EIP-191 signed, written to X Layer before OKX sees the order</li>
+            <li>Local append only JSONL log mirrors the onchain record</li>
+            <li>Tightening only: risk params can never loosen at runtime</li>
+          </ul>
+          <div class="path-stats">TradeAuditTrail.sol &middot; CHAIN 1952</div>
+          <a class="path-cta" href="https://github.com/Henoch4/portfolio-risk-copilot/blob/main/contracts/contracts/TradeAuditTrail.sol" target="_blank" rel="noopener">View contract <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+        </div>
+      </div>
+
+      <div class="path-card pc-ink reveal">
+        <div class="ruled" aria-hidden="true"></div>
+        <div class="path-card-body">
+          <div class="path-eyebrow">Clearance layer</div>
+          <div class="path-title">Validation Gate</div>
+          <ul class="path-list">
+            <li>Walk forward windows, Sharpe, CAGR, max drawdown, Calmar</li>
+            <li>Probability of backtest overfitting, checked before capital</li>
+            <li>Calmar &ge; 1.0 and PBO &le; 0.5 to clear for paper trading</li>
+          </ul>
+          <div class="path-stats">GET /api/v1/validation</div>
+          <a class="path-cta" href="https://github.com/Henoch4/portfolio-risk-copilot/blob/main/src/validation.py" target="_blank" rel="noopener">View validation.py <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+        </div>
+      </div>
+
+      <div class="path-card pc-lav full reveal" id="vault" style="min-height:220px;">
+        <div class="badge-soon">Soon</div>
+        <div class="path-card-body" style="margin-top:0;">
+          <div class="path-eyebrow">Depositor layer</div>
+          <div class="path-title">Depositor Vault</div>
+          <ul class="path-list" style="max-width:520px;">
+            <li>Pooled ERC-4626 style vault, external deposits grow the same pot the agent already trades</li>
+            <li>Depositor facing surface answers is my money safe, is it working, can I get it out</li>
+          </ul>
+          <div class="path-stats">22 OFFLINE EVM TESTS &middot; UI SURFACE DESIGN ONLY</div>
+          <div style="display:flex;gap:var(--sp-400);flex-wrap:wrap;margin-top:var(--sp-200);">
+            <a class="path-cta" href="https://github.com/Henoch4/portfolio-risk-copilot/blob/main/docs/DESIGN-external-vault.md" target="_blank" rel="noopener">Read the design doc <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+            <a class="path-cta" href="/depositor">Open vault UI <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="manifesto">
+  <div class="container">
+    <div class="manifesto-inner reveal">
+      <div class="section-eyebrow">Philosophy</div>
+      <p><b>AuditTrail Trader is not a trading bot, a signal service, or another prediction platform.</b></p>
+      <p>It pairs three independent signal strategies with a risk gate the AI cannot touch, so a confident model still cannot exceed the limits a human set for it.</p>
+      <p>Every approved decision is signed and written onchain before the order reaches OKX. If the write fails, the trade does not happen. There is nothing to reconstruct after a bad session.</p>
+      <p>You can read the same ledger the agent trades against. The point is to make the gap between what the AI decided and what it was allowed to do disappear.</p>
+      <div class="manifesto-links">
+        <a class="link-underline" href="#binder">Explore the governance layers</a>
+        <a class="link-underline" href="https://github.com/Henoch4/portfolio-risk-copilot" target="_blank" rel="noopener">Explore the repository</a>
+      </div>
+      <div class="manifesto-handle">@<a href="https://twitter.com/AuditTrailTrader" target="_blank" rel="noopener">AuditTrailTrader</a> &middot; built for OKX Build X AI Season</div>
+    </div>
+  </div>
+</section>
+
+<section id="binder">
+  <div class="container">
+    <div class="section-head reveal">
+      <div class="section-eyebrow">Ported governance layers</div>
+      <h2>Five modules a funding arbitrage desk would demand</h2>
+    </div>
+    <div class="binder-wrap reveal">
+      <div class="binder">
+        <div class="binder-row">
+          <span class="binder-num">01</span>
+          <div class="binder-swatch" style="background:#F4B942;"><svg viewBox="0 0 24 24" fill="none" stroke="#3A2600" stroke-width="2"><path d="M12 3 4 6.5v5c0 5 3.4 8.5 8 9.5 4.6-1 8-4.5 8-9.5v-5L12 3Z"/></svg></div>
+          <div><div class="binder-title">Data integrity gate</div><div class="binder-sub">src/data_integrity.py &middot; runs before signal generation</div></div>
+        </div>
+        <div class="binder-row">
+          <span class="binder-num">02</span>
+          <div class="binder-swatch" style="background:#6FE0A6;"><svg viewBox="0 0 24 24" fill="none" stroke="#0B2E1D" stroke-width="2"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg></div>
+          <div><div class="binder-title">Curator profile selector</div><div class="binder-sub">src/curator.py &middot; fixed allowlist, switch cooldown</div></div>
+        </div>
+        <div class="binder-row">
+          <span class="binder-num">03</span>
+          <div class="binder-swatch" style="background:#79C7E8;"><svg viewBox="0 0 24 24" fill="none" stroke="#062232" stroke-width="2"><path d="M4 7h7M4 12h16M4 17h7"/></svg></div>
+          <div><div class="binder-title">Multi leg execution</div><div class="binder-sub">src/multi_leg.py &middot; PENDING_FILL to LOCKED to SETTLED</div></div>
+        </div>
+        <div class="binder-row">
+          <span class="binder-num">04</span>
+          <div class="binder-swatch" style="background:#C9BFF5;"><svg viewBox="0 0 24 24" fill="none" stroke="#221A44" stroke-width="2"><path d="M4 19V6.5A2.5 2.5 0 0 1 6.5 4H16l4 4v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1Z"/><path d="M8 13h8M8 16.5h5"/></svg></div>
+          <div><div class="binder-title">Strategy validation</div><div class="binder-sub">src/validation.py &middot; Calmar, PBO, walk forward</div></div>
+        </div>
+        <div class="binder-row">
+          <span class="binder-num">05</span>
+          <div class="binder-swatch" style="background:#F3B9BE;"><svg viewBox="0 0 24 24" fill="none" stroke="#3A0D12" stroke-width="2"><path d="M6 6h12M6 10h12M6 14h8"/></svg></div>
+          <div><div class="binder-title">Local audit log</div><div class="binder-sub">src/audit_trail.py &middot; append only JSONL</div></div>
+        </div>
+        <div class="binder-caption">Contents of<br>the risk binder</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <div class="section-head reveal">
+      <div class="section-eyebrow">Beyond the gate</div>
+      <h2>Everything else in the system</h2>
+    </div>
+    <div class="bento">
+      <a class="bento-card bn-1 reveal" href="https://github.com/Henoch4/portfolio-risk-copilot/blob/main/src/signals.py" target="_blank" rel="noopener">
+        <div class="bento-top"><span class="bento-num">01</span><span class="bento-tag">Signal<br>engine</span></div>
+        <div class="bento-bottom"><div><h3>Signals</h3><p>signals.py, 15 tests</p></div><span class="bento-arrow"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div>
+      </a>
+      <a class="bento-card bn-2 reveal" href="/" target="_blank" rel="noopener">
+        <div class="bento-top"><span class="bento-num">02</span><span class="bento-tag">Order<br>routing</span></div>
+        <div class="bento-bottom"><div><h3>Execution</h3><p>RiskGate + OrderExecutor</p></div><span class="bento-arrow"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div>
+      </a>
+      <a class="bento-card bn-3 reveal" href="https://github.com/Henoch4/portfolio-risk-copilot/blob/main/src/curator.py" target="_blank" rel="noopener">
+        <div class="bento-top"><span class="bento-num">03</span><span class="bento-tag">Profile<br>select</span></div>
+        <div class="bento-bottom"><div><h3>Curator</h3><p>Default passthrough env knobs</p></div><span class="bento-arrow"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div>
+      </a>
+      <a class="bento-card bn-4 reveal" href="https://github.com/Henoch4/portfolio-risk-copilot/blob/main/src/validation.py" target="_blank" rel="noopener">
+        <div class="bento-top"><span class="bento-num">04</span><span class="bento-tag">Clearance<br>check</span></div>
+        <div class="bento-bottom"><div><h3>Validation</h3><p>Calmar &amp; PBO gate</p></div><span class="bento-arrow"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div>
+      </a>
+      <a class="bento-card bn-5 reveal" href="https://github.com/Henoch4/portfolio-risk-copilot/blob/main/src/multi_leg.py" target="_blank" rel="noopener">
+        <div class="bento-top"><span class="bento-num">05</span><span class="bento-tag">State<br>machine</span></div>
+        <div class="bento-bottom"><div><h3>Multi leg</h3><p>Atomic fills, unwind on breach</p></div><span class="bento-arrow"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div>
+      </a>
+      <a class="bento-card bn-6 reveal" href="https://github.com/Henoch4/portfolio-risk-copilot/blob/main/src/audit_trail.py" target="_blank" rel="noopener">
+        <div class="bento-top"><span class="bento-num">06</span><span class="bento-tag">Local<br>ledger</span></div>
+        <div class="bento-bottom"><div><h3>Audit log</h3><p>JSONL, mirrors onchain record</p></div><span class="bento-arrow"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div>
+      </a>
+      <a class="bento-card bn-7 reveal" href="https://github.com/Henoch4/portfolio-risk-copilot/tree/main/contracts" target="_blank" rel="noopener">
+        <div class="bento-top"><span class="bento-num">07</span><span class="bento-tag">Solidity<br>source</span></div>
+        <div class="bento-bottom"><div><h3>Contracts</h3><p>TradeAuditTrail.sol + ABI</p></div><span class="bento-arrow"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div>
+      </a>
+      <a class="bento-card bn-8 reveal" href="https://github.com/Henoch4/portfolio-risk-copilot/tree/main/tests" target="_blank" rel="noopener">
+        <div class="bento-top"><span class="bento-num">08</span><span class="bento-tag">Offline<br>suite</span></div>
+        <div class="bento-bottom"><div><h3>Tests</h3><p>349 cases, no network needed</p></div><span class="bento-arrow"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div>
+      </a>
+    </div>
+  </div>
+</section>
+
+<section id="fee">
+  <div class="container">
+    <div class="section-head reveal">
+      <div class="section-eyebrow">Pricing</div>
+      <h2>How it's priced</h2>
+    </div>
+    <div class="fee-wrap reveal">
+      <div class="fee-card">
+        <div class="fee-top">
+          <span class="fee-price">$0.50 <span class="fee-unit">USDT</span></span>
+          <span class="fee-unit">per trading cycle</span>
+        </div>
+        <p class="fee-desc">Paid over x402, already wired end to end from the existing ASP integration. No subscription, no lockup. Self custodial: the agent connects to OKX over OAuth or demo mode, so your exchange keys never pass through it.</p>
+        <div class="fee-cta">
+          <a class="link-underline" href="https://github.com/Henoch4/portfolio-risk-copilot/blob/main/manifest.json" target="_blank" rel="noopener">Read the ASP manifest &rarr;</a>
+        </div>
+      </div>
+      <div class="fee-card">
+        <div class="fee-top">
+          <span class="fee-price pending">Not set yet</span>
+          <span class="fee-soon-badge">Vault, soon</span>
+        </div>
+        <p class="fee-desc">A management or performance fee for the pooled depositor vault has not been announced. It will be published here the day deposits open, not before.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="cred">
+  <div class="container">
+    <div class="cred-copy reveal">
+      <div class="section-eyebrow">Transparency</div>
+      <h2>Watch every decision get made.</h2>
+      <p>No highlight reel. The same TradeAuditTrail.sol ledger the agent trades against is public on X Layer testnet, chain 1952, queryable with the ABI in the repository.</p>
+      <div class="cred-actions">
+        <a class="btn-pill" href="https://testnet.xlayer.tech/address/0x4b368e5bc52E618aD62d2bE8207E1bE2d5A9E5Cb" target="_blank" rel="noopener">Enter the audit trail</a>
+        <a class="btn-pill ghost" href="/depositor">Open vault UI</a>
+      </div>
+    </div>
+
+    <div class="mini-ledger reveal">
+      <div class="mini-ledger-grid" aria-hidden="true"></div>
+      <div class="mini-cards">
+        <div class="mini-card">
+          <div class="mini-card-top"><span class="mini-pair">BTC-USDT-SWAP</span><span class="mini-status ok">Logged</span></div>
+          <div class="mini-detail">Momentum long, confidence 78%</div>
+          <div class="mini-hash">0x8f2c&hellip;a91d</div>
+        </div>
+        <div class="mini-card">
+          <div class="mini-card-top"><span class="mini-pair">SOL-USDT-SWAP</span><span class="mini-status no">Blocked</span></div>
+          <div class="mini-detail">Confidence 65%, below the 70% floor</div>
+          <div class="mini-hash">no order built</div>
+        </div>
+        <div class="mini-card">
+          <div class="mini-card-top"><span class="mini-pair">ETH-USDT-SWAP</span><span class="mini-status ok">Logged</span></div>
+          <div class="mini-detail">Funding rate short, confidence 74%</div>
+          <div class="mini-hash">0x11ab&hellip;4e02</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="container">
+    <div class="section-head reveal">
+      <div class="section-eyebrow">FAQ</div>
+      <h2>Questions people ask before joining</h2>
+    </div>
+    <div class="faq-list reveal">
+      <div class="faq-item">
+        <button class="faq-q"><span>Where should I start?</span><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span></button>
+        <div class="faq-a"><p>Start with the Risk Gate card if you care about what the AI cannot do. Start with Signal Engine if you want to know how it decides. Start with Audit Trail if you want to verify a claim yourself.</p></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q"><span>What does &ldquo;non overridable&rdquo; actually mean?</span><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span></button>
+        <div class="faq-a"><p>The RiskGate sits between the signal engine and execution as its own module. The agent can propose a trade, but it has no code path that edits position limits, daily loss caps or the confidence floor. Those values can only be tightened, never loosened, at runtime.</p></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q"><span>What happens if the onchain log fails to write?</span><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span></button>
+        <div class="faq-a"><p>Trading is blocked for that cycle. The order is signal, then risk check, then onchain log, then execution. If any step before execution fails, including the log write, the order never reaches OKX.</p></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q"><span>Does it need my OKX private keys?</span><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span></button>
+        <div class="faq-a"><p>No. The exchange side connects through OKX OAuth or demo mode. A separate agent wallet key exists only to sign decisions for the onchain audit log, a different key with a different purpose.</p></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q"><span>Which assets and venues does it trade?</span><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span></button>
+        <div class="faq-a"><p>BTC, ETH, SOL and BNB perpetual swaps on OKX today. The allowlist is enforced by the RiskGate, so adding an asset is a deliberate change, not something a signal can do on its own.</p></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q"><span>Can I deposit funds today?</span><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span></button>
+        <div class="faq-a"><p>Not yet. The pooled vault contract, an ERC-4626 style design, is written and covered by 22 offline EVM tests, but the depositor facing surface is still design only. <a href="/depositor" style="color:var(--accent);text-decoration:underline;">The vault UI is live on testnet</a> &mdash; the waitlist tells you the moment deposits open.</p></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q"><span>Is this financial advice or a guaranteed return?</span><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span></button>
+        <div class="faq-a"><p>No. This is trading infrastructure with hard risk limits, not a promise of performance. Perpetual swaps are leveraged instruments and can lose money quickly, including the full deposited amount.</p></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q"><span>Is the code open source?</span><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span></button>
+        <div class="faq-a"><p>Yes. The signal engine, the risk gate, the contract and the full test suite are public on <a href="https://github.com/Henoch4/portfolio-risk-copilot" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline;">GitHub</a>, including the smoke tests you can run offline before trusting any of the above.</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="waitlist">
+  <div class="container">
+    <div class="final-cta reveal">
+      <h2>Get notified the day the vault opens for deposits</h2>
+      <p>No spam, no drip campaign. One email, sent once the depositor surface ships and the vault is live on X Layer.</p>
+      <form class="waitlist-form" id="waitlistForm" novalidate>
+        <label for="email" style="position:absolute;left:-9999px;">Email address</label>
+        <input type="email" id="email" name="email" placeholder="you@domain.com" autocomplete="email" required>
+        <button type="submit" class="btn-pill" id="waitlistBtn">Join the waitlist</button>
+      </form>
+      <div class="form-msg" id="formMsg" role="status" aria-live="polite"></div>
+      <div class="final-note">349 TESTS PASS OFFLINE TODAY. NOTHING HERE TOUCHES LIVE CAPITAL UNTIL THE VAULT SHIPS.</div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<button class="back-to-top" id="backToTop" aria-label="Back to top">&uarr;</button>
+
+<footer>
+  <div class="container">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <div class="nav-brand">
+          <svg width="20" height="20" viewBox="0 0 32 32" fill="none"><rect x="3" y="3" width="26" height="26" rx="8" stroke="var(--ink)" stroke-width="2.1"/><path d="M10 17 14.2 21.2 23 11" stroke="var(--ink)" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          AuditTrail Trader
+        </div>
+        <p>A multi agent trading system with a non overridable risk gate and an onchain audit trail, built for the OKX Build X AI Season hackathon.</p>
+      </div>
+      <div class="footer-cols">
+        <div class="footer-col">
+          <h4>Product</h4>
+          <a href="#paths">Entry points</a>
+          <a href="#binder">Governance</a>
+          <a href="#faq">FAQ</a>
+          <a href="/">Live dashboard</a>
+          <a href="/depositor">Vault UI</a>
+        </div>
+        <div class="footer-col">
+          <h4>Project</h4>
+          <a href="https://github.com/Henoch4/portfolio-risk-copilot" target="_blank" rel="noopener">GitHub repository</a>
+          <a href="https://twitter.com/AuditTrailTrader" target="_blank" rel="noopener">@AuditTrailTrader</a>
+          <span class="soon">Docs (coming soon)</span>
+        </div>
+        <div class="footer-col">
+          <h4>Legal</h4>
+          <span class="soon">Privacy policy (coming soon)</span>
+          <span class="soon">Terms of use (coming soon)</span>
+        </div>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>&copy; 2026 AuditTrail Trader. Built for OKX Build X AI Season.</span>
+      <span>Deployed on X Layer testnet, chain 1952.</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+(function(){
+  /* --- announcement dismiss with collapse --- */
+  var announce=document.getElementById('announce');
+  document.getElementById('announceClose').addEventListener('click',function(){
+    announce.classList.add('hidden');
+    setTimeout(function(){ announce.style.display='none'; },450);
+  });
+
+  /* --- nav modal --- */
+  var toggle=document.getElementById('navToggle');
+  var modal=document.getElementById('navModal');
+  function closeModal(){ modal.classList.remove('open'); toggle.setAttribute('aria-expanded','false'); }
+  toggle.addEventListener('click',function(){
+    var open=modal.classList.toggle('open');
+    toggle.setAttribute('aria-expanded',open?'true':'false');
+  });
+  document.getElementById('navModalClose').addEventListener('click',closeModal);
+  modal.querySelectorAll('[data-close]').forEach(function(el){ el.addEventListener('click',closeModal); });
+
+  /* --- scroll reveal with stagger for bento + binder --- */
+  var revealEls=document.querySelectorAll('.reveal');
+  var io=new IntersectionObserver(function(entries){
+    entries.forEach(function(e){
+      if(!e.isIntersecting) return;
+      var el=e.target;
+      var delay=0;
+      /* bento cards: stagger 60ms apart */
+      if(el.closest('.bento') && el.classList.contains('bento-card')){
+        var idx=Array.from(el.closest('.bento').children).indexOf(el);
+        delay=idx*60;
+      }
+      /* binder rows: stagger 80ms apart */
+      if(el.closest('.binder') && el.classList.contains('binder-row')){
+        var idx=Array.from(el.closest('.binder').querySelectorAll('.binder-row')).indexOf(el);
+        delay=idx*80;
+      }
+      setTimeout(function(){ el.classList.add('in'); },delay);
+      io.unobserve(el);
+    });
+  },{threshold:0.12});
+  revealEls.forEach(function(el){ io.observe(el); });
+
+  /* --- FAQ accordion --- */
+  var faqItems=document.querySelectorAll('.faq-item');
+  faqItems.forEach(function(item){
+    var btn=item.querySelector('.faq-q');
+    var answer=item.querySelector('.faq-a');
+    btn.setAttribute('aria-expanded','false');
+    btn.addEventListener('click',function(){
+      var isOpen=item.classList.contains('open');
+      faqItems.forEach(function(other){
+        if(other!==item){
+          other.classList.remove('open');
+          other.querySelector('.faq-q').setAttribute('aria-expanded','false');
+          other.querySelector('.faq-a').style.maxHeight=null;
+        }
+      });
+      if(isOpen){
+        item.classList.remove('open');
+        btn.setAttribute('aria-expanded','false');
+        answer.style.maxHeight=null;
+      } else {
+        item.classList.add('open');
+        btn.setAttribute('aria-expanded','true');
+        answer.style.maxHeight=answer.scrollHeight+'px';
+      }
+    });
+  });
+  window.addEventListener('resize',function(){
+    var openItem=document.querySelector('.faq-item.open');
+    if(openItem){ var a=openItem.querySelector('.faq-a'); a.style.maxHeight=a.scrollHeight+'px'; }
+  });
+
+  /* --- waitlist form --- */
+  var form=document.getElementById('waitlistForm');
+  var emailInput=document.getElementById('email');
+  var msg=document.getElementById('formMsg');
+  var btn=document.getElementById('waitlistBtn');
+  form.addEventListener('submit',function(e){
+    e.preventDefault();
+    var val=emailInput.value.trim();
+    var valid=/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val);
+    if(!valid){
+      emailInput.setAttribute('aria-invalid','true');
+      msg.textContent='Enter a valid email address.';
+      msg.className='form-msg err';
+      emailInput.focus();
+      return;
+    }
+    emailInput.removeAttribute('aria-invalid');
+    btn.textContent='Adding you...';
+    btn.disabled=true;
+    setTimeout(function(){
+      msg.textContent="You're on the list. We'll email you when the vault opens.";
+      msg.className='form-msg ok';
+      btn.textContent='Join the waitlist';
+      btn.disabled=false;
+      form.reset();
+    },700);
+  });
+
+  /* --- back to top --- */
+  var btt=document.getElementById('backToTop');
+  window.addEventListener('scroll',function(){
+    if(window.scrollY>600) btt.classList.add('visible');
+    else btt.classList.remove('visible');
+  });
+  btt.addEventListener('click',function(){ window.scrollTo({top:0,behavior:'smooth'}); });
+})();
+</script>
+</body>
+</html>

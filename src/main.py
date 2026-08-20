@@ -229,13 +229,17 @@ async def hire(req: HireRequest):
     return asdict(report)
 
 
-# --- Dashboard ---
+# --- Pages ---
 _STATIC_DIR = pathlib.Path(__file__).resolve().parent.parent / "static"
 
 if _STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     @app.get("/", include_in_schema=False)
+    def landing():
+        return FileResponse(str(_STATIC_DIR / "landing.html"))
+
+    @app.get("/dashboard", include_in_schema=False)
     def dashboard():
         return FileResponse(str(_STATIC_DIR / "index.html"))
 
@@ -614,15 +618,34 @@ async def activate_kill_switch(req: KillSwitchRequest, _auth: None = Depends(_re
 @app.post("/kill-switch/deactivate")
 async def deactivate_kill_switch(_auth: None = Depends(_require_agent_token)):
     """Resume trading. A deliberate, separate call — this is never triggered
-    automatically, only the activation is (see RiskGate.report_loss)."""
-    _risk_gate.deactivate_kill_switch()
+    automatically, only the activation is (see RiskGate.report_loss).
+
+    Layer order matters: the onchain kill switch is the non-overridable layer
+    (enforced by TradeAuditTrail.sol even if this process is bypassed), so it
+    must be lifted BEFORE the local gate. Previously the local gate was
+    cleared first and the onchain step was best-effort — if the onchain tx
+    failed, the endpoint still reported "deactivated" while the contract
+    stayed halted: a false status and two layers disagreeing until restart.
+    Now a failed onchain deactivation leaves the local gate active
+    (fail-closed) and returns an explicit error instead of a fake success.
+    """
     result: dict = {"status": "deactivated", "onchain": None}
     if _onchain_logger:
         try:
             tx_hash = _onchain_logger.deactivate_kill_switch()
             result["onchain"] = {"tx_hash": tx_hash}
         except Exception as e:
+            # Keep the local halt active: clearing it while the contract is
+            # still halted would report a resume that logDecision refuses.
+            result["status"] = "deactivate_failed"
+            result["error"] = f"Onchain deactivation failed: {e}"
             result["onchain"] = {"error": str(e)}
+            logger.error(
+                "Onchain kill switch deactivation failed; local gate left "
+                "active (fail-closed): %s", e,
+            )
+            return result
+    _risk_gate.deactivate_kill_switch()
     return result
 
 
