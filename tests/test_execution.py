@@ -294,7 +294,7 @@ class TestDailyCounterUtcRollover:
 
     def test_counters_reset_across_utc_day_boundary(self, monkeypatch):
         import datetime as _dt
-        import src.execution as _exec
+        import src.execution.risk_gate as _rg
         gate = self._gate()
         kwargs = dict(current_price=50000, current_price_timestamp=_fresh_ts())
 
@@ -314,13 +314,13 @@ class TestDailyCounterUtcRollover:
             def now(tz=None):
                 return midnight
 
-        monkeypatch.setattr(_exec, "datetime", _FakeClock)
+        monkeypatch.setattr(_rg, "datetime", _FakeClock)
         assert gate.check_order(self._order(), "agent1", **kwargs).approved is True
         assert gate.get_daily_stats("agent1")["trade_count"] == 1
 
     def test_loss_counter_is_day_scoped(self, monkeypatch):
         import datetime as _dt
-        import src.execution as _exec
+        import src.execution.risk_gate as _rg
         gate = RiskGate(max_daily_loss_usd=500)
         gate.report_loss("agent1", 400)  # under limit, no kill switch
 
@@ -332,7 +332,7 @@ class TestDailyCounterUtcRollover:
             def now(tz=None):
                 return prev_day
 
-        monkeypatch.setattr(_exec, "datetime", _FakeClock)
+        monkeypatch.setattr(_rg, "datetime", _FakeClock)
         # On the PREVIOUS day key, no loss was reported.
         assert gate.get_daily_stats("agent1")["loss"] == 0.0
 
@@ -1014,8 +1014,8 @@ class TestDurableCounters:
             def now(tz=None):
                 return next_day
 
-        import src.execution as _exec
-        monkeypatch.setattr(_exec, "datetime", _FakeClock)
+        import src.execution.risk_gate as _rg
+        monkeypatch.setattr(_rg, "datetime", _FakeClock)
 
         gate2 = self._make(tmp_path / "state.json", max_daily_trades=2)
         # New UTC day => fresh bucket, the prior limit no longer applies.
