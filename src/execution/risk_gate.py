@@ -61,6 +61,8 @@ class DurableDailyCounters:
             return cls._LOCKS.setdefault(path, threading.Lock())
 
     def _load(self) -> dict[str, dict]:
+        if not self.path:
+            return {}
         try:
             with open(self.path, "r") as f:
                 data = json.load(f)
@@ -100,13 +102,13 @@ class DurableDailyCounters:
             logger.error(f"DurableDailyCounters: failed to persist to {self.path}: {e}")
 
     def get(self, key: str, field: str, default):
-        if not self.enabled:
+        if not self.enabled or not self._lock:
             return default
         with self._lock:
             return self._data.get(key, {}).get(field, default)
 
     def set(self, key: str, **fields) -> None:
-        if not self.enabled:
+        if not self.enabled or not self._lock:
             return
         with self._lock:
             entry = self._data.setdefault(key, {})
@@ -114,7 +116,7 @@ class DurableDailyCounters:
             self._persist()
 
     def increment(self, key: str, field: str, amount) -> None:
-        if not self.enabled:
+        if not self.enabled or not self._lock:
             return
         with self._lock:
             entry = self._data.setdefault(key, {})
@@ -122,13 +124,13 @@ class DurableDailyCounters:
             self._persist()
 
     def keys_with_prefix(self, prefix: str) -> list[str]:
-        if not self.enabled:
+        if not self.enabled or not self._lock:
             return []
         with self._lock:
             return sorted(k for k in self._data if k.startswith(prefix))
 
     def snapshot(self, key: str) -> dict:
-        if not self.enabled:
+        if not self.enabled or not self._lock:
             return {}
         with self._lock:
             return dict(self._data.get(key, {}))
