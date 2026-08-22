@@ -1,5 +1,5 @@
 """
-FastAPI ASP surface for the Portfolio Risk Copilot.
+FastAPI ASP surface for the AuditTrail Trader.
 Exposes /hire (run an audit), /manifest, /health.
 
 Run locally (after completing README.md setup):
@@ -64,7 +64,7 @@ ALLOW_LIVE = os.getenv("ALLOW_LIVE", "false").lower() == "true"
 
 _MANIFEST_PATH = pathlib.Path(__file__).resolve().parent.parent / "manifest.json"
 
-app = FastAPI(title="Portfolio Risk Copilot", version="0.1.0")
+app = FastAPI(title="AuditTrail Trader", version="0.1.0")
 app.include_router(vault_router)
 
 
@@ -317,6 +317,7 @@ _trading_agent = AutonomousTradingAgent(
     audit_log=_audit_log,
     multi_leg_manager=_multi_leg_manager,
     funding_arb_min_rate=float(os.getenv("FUNDING_ARB_MIN_RATE", "0.001")),
+    regime_filter_window=int(os.getenv("REGIME_FILTER_WINDOW", "50")),
 )
 
 
@@ -411,7 +412,9 @@ async def audit_stats(days: int = 7):
         return {"error": "Onchain logger not configured. Set XLAYER_RPC_URL, AUDIT_CONTRACT_ADDRESS, and AGENT_WALLET_PRIVATE_KEY."}
     
     try:
-        stats = _onchain_logger.get_contract_stats(days=days)
+        # Onchain query is blocking RPC I/O — run it off the event loop so a
+        # slow chain read can't freeze every other endpoint (incl. /trade).
+        stats = await asyncio.to_thread(_onchain_logger.get_contract_stats, days=days)
         return stats
     except Exception as e:
         raise HTTPException(500, f"Audit query failed: {e}")
@@ -608,7 +611,12 @@ async def activate_kill_switch(req: KillSwitchRequest, _auth: None = Depends(_re
     result: dict = {"status": "activated", "reason": req.reason, "onchain": None}
     if _onchain_logger:
         try:
-            tx_hash = _onchain_logger.activate_kill_switch(req.reason)
+            # Blocking tx send + receipt wait — off the event loop. This is
+            # the incident path: a frozen loop here would also freeze /trade
+            # mid-cycle, the opposite of what a halt wants.
+            tx_hash = await asyncio.to_thread(
+                _onchain_logger.activate_kill_switch, req.reason,
+            )
             result["onchain"] = {"tx_hash": tx_hash}
         except Exception as e:
             result["onchain"] = {"error": str(e)}
@@ -632,7 +640,9 @@ async def deactivate_kill_switch(_auth: None = Depends(_require_agent_token)):
     result: dict = {"status": "deactivated", "onchain": None}
     if _onchain_logger:
         try:
-            tx_hash = _onchain_logger.deactivate_kill_switch()
+            tx_hash = await asyncio.to_thread(
+                _onchain_logger.deactivate_kill_switch,
+            )
             result["onchain"] = {"tx_hash": tx_hash}
         except Exception as e:
             # Keep the local halt active: clearing it while the contract is
@@ -655,7 +665,7 @@ async def deactivate_kill_switch(_auth: None = Depends(_require_agent_token)):
 async def vault_reconciliation(_auth: None = Depends(_require_agent_token)):
     """Operator-only reconciliation snapshot: vault totalAssets vs OKX balance.
     Requires agent token — leaks OKX balance and suggested attestation."""
-    vault_state = read_vault_state()
+    vault_state = await asyncio.to_thread(read_vault_state)
     okx_data = await read_okx_balance(_cli)
     result = reconcile(vault_state, okx_data)
     return asdict(result)
@@ -666,7 +676,7 @@ async def vault_attest(_auth: None = Depends(_require_agent_token)):
     """Operator triggers attestTotalAssets on the vault contract.
     Reads the current OKX balance, computes the suggested attestation value,
     and sends the transaction. Requires AGENT_API_TOKEN + vault configured."""
-    vault_state = read_vault_state()
+    vault_state = await asyncio.to_thread(read_vault_state)
     if not vault_state.get("deployed"):
         raise HTTPException(503, "Vault not deployed or not configured")
 
@@ -686,37 +696,44 @@ async def vault_attest(_auth: None = Depends(_require_agent_token)):
         raise HTTPException(500, "Missing XLAYER_RPC_URL, AGENT_WALLET_PRIVATE_KEY, or VAULT_CONTRACT_ADDRESS")
 
     try:
-        from web3 import Web3
         from eth_account import Account
 
-        w3 = Web3(Web3.HTTPProvider(rpc_url))
-        if not w3.is_connected():
-            raise HTTPException(502, "Cannot connect to X Layer RPC")
+        from .rpc import get_web3
 
-        abi_path = pathlib.Path(__file__).resolve().parent.parent / "contracts" / "artifacts" / "TradingVault_abi.json"
-        abi = json.loads(abi_path.read_text()) if abi_path.exists() else []
-        vault = w3.eth.contract(address=w3.to_checksum_address(vault_addr), abi=abi)
+        def _send_attestation_tx() -> dict:
+            # All blocking (web3 build/sign/send + 120s receipt wait) — runs
+            # on a worker thread via to_thread below so the event loop (and
+            # every other endpoint) stays responsive during the wait.
+            w3 = get_web3()
+            if not w3.is_connected():
+                raise HTTPException(502, "Cannot connect to X Layer RPC")
 
-        account = Account.from_key(private_key)
-        nonce = w3.eth.get_transaction_count(account.address)
-        tx = vault.functions.attestTotalAssets(result.suggested_attestation).build_transaction({
-            "chainId": int(os.getenv("XLAYER_CHAIN_ID", "1952")),
-            "gas": 300000,
-            "gasPrice": w3.to_wei("1", "gwei"),
-            "nonce": nonce,
-        })
-        signed = w3.eth.account.sign_transaction(tx, private_key)
-        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+            abi_path = pathlib.Path(__file__).resolve().parent.parent / "contracts" / "artifacts" / "TradingVault_abi.json"
+            abi = json.loads(abi_path.read_text()) if abi_path.exists() else []
+            vault = w3.eth.contract(address=w3.to_checksum_address(vault_addr), abi=abi)
 
-        return {
-            "status": "attested",
-            "suggested": result.suggested_attestation,
-            "tx_hash": tx_hash.hex(),
-            "gas_used": receipt.get("gasUsed", receipt.get("gas_used", 0)),
-            "discrepancy_usdt": result.discrepancy_usdt,
-            "okx_balance_usdt": result.okx_balance_usdt,
-        }
+            account = Account.from_key(private_key)
+            nonce = w3.eth.get_transaction_count(account.address)
+            tx = vault.functions.attestTotalAssets(result.suggested_attestation).build_transaction({
+                "chainId": int(os.getenv("XLAYER_CHAIN_ID", "1952")),
+                "gas": 300000,
+                "gasPrice": w3.to_wei("1", "gwei"),
+                "nonce": nonce,
+            })
+            signed = w3.eth.account.sign_transaction(tx, private_key)
+            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+            return {
+                "status": "attested",
+                "suggested": result.suggested_attestation,
+                "tx_hash": tx_hash.hex(),
+                "gas_used": receipt.get("gasUsed", receipt.get("gas_used", 0)),
+                "discrepancy_usdt": result.discrepancy_usdt,
+                "okx_balance_usdt": result.okx_balance_usdt,
+            }
+
+        return await asyncio.to_thread(_send_attestation_tx)
     except HTTPException:
         raise
     except Exception as e:

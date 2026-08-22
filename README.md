@@ -69,7 +69,7 @@ Tests: `python -m pytest tests/ -q` — 280 tests, fully offline.
 ## Files
 
 ```
-Portfolio-risk-copilot/
+AuditTrailTrader/
 ├── contracts/
 │   ├── contracts/TradeAuditTrail.sol    # Audit trail smart contract
 │   ├── artifacts/TradeAuditTrail_abi.json  # Compiled ABI
