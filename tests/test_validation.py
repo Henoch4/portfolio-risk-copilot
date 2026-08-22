@@ -100,6 +100,20 @@ def test_validation_report_cleared_only_when_oos_calmar_bar_met():
     assert report["cleared_for_paper_trading"] is True
 
 
+def test_validation_report_never_traded_oos_does_not_vacuously_clear():
+    # All-zero OOS returns = the strategy never traded out of sample. Zero
+    # drawdown makes Calmar hit the 1e9 cap; that must NOT clear the gate.
+    # Regression for the vacuous pass found in the 2026-08-22 real-data run
+    # (funding contrarian: 0 trades on BTC/ETH/BNB in 2y, still "PASS").
+    rng = np.random.default_rng(7)
+    returns = rng.normal(0.0, 0.01, 600)
+    report = validation_report(returns, np.zeros(600), calmar_bar=1.0)
+    assert report["out_of_sample"]["calmar"] >= 1.0  # the vacuous number itself
+    assert report["has_oos_evidence"] is False
+    assert report["passes_calmar_bar"] is False
+    assert report["cleared_for_paper_trading"] is False
+
+
 def test_validation_report_fails_high_calmar_bar():
     # Noisy zero-edge series cannot clear a demanding bar.
     rng = np.random.default_rng(5)

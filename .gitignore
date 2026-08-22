@@ -41,3 +41,10 @@ contracts/artifacts/*.txt
 
 # Local append-only audit log (runtime artifact)
 audit_log.jsonl
+
+# Local test run captures
+test_output.txt
+test_results.txt
+
+# Fetched market-data cache (scripts/fetch_history.py; refetch at any time)
+data/

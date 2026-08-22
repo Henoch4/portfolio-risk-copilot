@@ -145,7 +145,17 @@ def validation_report(returns: np.ndarray, oos_returns: np.ndarray,
     }
 
     report["calmar_bar"] = calmar_bar
-    report["passes_calmar_bar"] = report["out_of_sample"]["calmar"] >= calmar_bar
+    # A strategy that never traded OOS has an all-zero return series, zero
+    # drawdown, and calmar_ratio's 1e9 cap for that case -- which would
+    # vacuously "clear" the bar. Found in the 2026-08-22 real-data gate run
+    # (reports/validation-gate-2026-08-22.md): the funding contrarian fired
+    # 0 times on BTC/ETH/BNB in 2 years and was declared PASS. Cleared must
+    # mean "evidence of edge", and a never-traded OOS stream is no evidence.
+    has_oos_evidence = bool(np.any(oos_returns != 0))
+    report["has_oos_evidence"] = has_oos_evidence
+    report["passes_calmar_bar"] = has_oos_evidence and (
+        report["out_of_sample"]["calmar"] >= calmar_bar
+    )
 
     if param_grid_returns and param_grid_oos_returns:
         report["pbo_analysis"] = evaluate_parameter_grid(param_grid_returns, param_grid_oos_returns)
