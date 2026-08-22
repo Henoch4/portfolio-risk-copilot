@@ -670,7 +670,12 @@ class TestPriceFreshnessGate:
 
 
 class _FakeOkxCli:
-    """Fake OKX CLI returning a canned order response (no network)."""
+    """Fake OKX CLI returning a canned order response (no network).
+
+    Answers `public instruments` with metadata sized so 1 contract = $100 at
+    the tests' reference price of 50000 (ctVal 0.002 base ccy) — a $100 USD
+    order converts to exactly 1 contract.
+    """
 
     def __init__(self, fill_px="50000", state="filled"):
         self.fill_px = fill_px
@@ -679,6 +684,15 @@ class _FakeOkxCli:
 
     async def run(self, *args, **kwargs):
         self.calls.append((args, kwargs))
+        if args[0:2] == ("market", "instruments"):
+            return {"data": [{
+                "instId": args[args.index("--instId") + 1] if "--instId" in args else "BTC-USDT-SWAP",
+                "instType": "SWAP",
+                "ctVal": "0.002",
+                "ctValCcy": "BTC",
+                "lotSz": "0.002",
+                "minSz": "0.002",
+            }]}
         return {"data": [{
             "ordId": "12345",
             "clOrdId": "auto_fake",
@@ -791,7 +805,7 @@ class TestCliArgvConstruction:
         await executor.place_order(
             order, current_price=50000, current_price_timestamp=_fresh_ts(),
         )
-        args = cli.calls[0][0]
+        args = next(a for a, _ in cli.calls if a[0:2] == ("trade", "order"))
         assert args[0:6] == ("trade", "order", "--instId", "BTC-USDT-SWAP",
                              "--side", "buy")
         # The px flag arrives as two separate argv tokens, never one glued one.
@@ -810,7 +824,7 @@ class TestCliArgvConstruction:
         await executor.place_order(
             order, current_price=50000, current_price_timestamp=_fresh_ts(),
         )
-        args = cli.calls[0][0]
+        args = next(a for a, _ in cli.calls if a[0:2] == ("trade", "order"))
         assert "--px" not in args
         assert "50100" not in args
 
@@ -831,6 +845,7 @@ class TestCliArgvConstruction:
         for args, _ in cli.calls:
             assert "" not in args
             assert all(a != "" for a in args)
+        # Instrument lookup + order submit both go through argv cleanly.
 
     @pytest.mark.asyncio
     async def test_reduce_only_flag_present_when_requested(self):
@@ -842,7 +857,7 @@ class TestCliArgvConstruction:
         await executor.place_order(
             order, current_price=50000, current_price_timestamp=_fresh_ts(),
         )
-        args = cli.calls[0][0]
+        args = next(a for a, _ in cli.calls if a[0:2] == ("trade", "order"))
         assert "--reduceOnly" in args, args
 
     @pytest.mark.asyncio
@@ -855,7 +870,7 @@ class TestCliArgvConstruction:
         await executor.place_order(
             order, current_price=50000, current_price_timestamp=_fresh_ts(),
         )
-        args = cli.calls[0][0]
+        args = next(a for a, _ in cli.calls if a[0:2] == ("trade", "order"))
         assert "--reduceOnly" not in args, args
 
 
@@ -1086,3 +1101,400 @@ class TestOnchainReconciliation:
             counter_store=DurableDailyCounters(path=str(tmp_path / "s.json"), enabled=False),
         )
         assert gate._kill_switch_active is False
+
+
+class TestSingleCountPerOrder:
+    """Regression: one logical order must consume exactly ONE daily-trade
+    slot, and only when it is actually placed.
+
+    The real flow runs every order through the gate twice — the agent's
+    pre-flight check (agent.py Phase 3 / funding-arb proposal, under the
+    agent's id) and again inside OrderExecutor.place_order just before
+    submission. Before the fix, every approved check incremented a daily
+    counter, and the two checks used DIFFERENT agent keys: the pre-flight
+    burned the agent's own quota for orders that never executed (onchain log
+    failures, failed submissions, aborted arb packages), while every executed
+    order silently inflated a phantom "default" bucket nobody reported or
+    enforced. Fixes: pre-flights pass count_trade=False; the executor is wired
+    with the agent's id so its pre-submission check is the single, correct
+    count point."""
+
+    def _gate(self, max_daily_trades=2):
+        return RiskGate(max_daily_trades=max_daily_trades)
+
+    def _order(self):
+        return OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="buy", order_type="market", size="100",
+            confidence_bps=8000,
+        )
+
+    def _executor(self, gate, agent_id="agent1"):
+        # The agent wires its own agent_id into the executor (agent.py
+        # constructs OrderExecutor(..., agent_id=agent_id)), so the executor's
+        # pre-submission check — the sole count_trade check — lands in the
+        # SAME daily bucket as the agent's pre-flight checks.
+        return OrderExecutor(cli=_FakeOkxCli(fill_px="50000"),
+                             risk_gate=gate, agent_id=agent_id)
+
+    @pytest.mark.asyncio
+    async def test_precheck_then_executor_counts_once(self):
+        gate = self._gate(max_daily_trades=2)
+        executor = self._executor(gate)
+        ts = _fresh_ts()
+
+        # Agent pre-flight (what run_trading_cycle does before onchain log):
+        pre = gate.check_order(
+            self._order(), "agent1", current_price=50000,
+            current_price_timestamp=ts, count_trade=False,
+        )
+        assert pre.approved is True
+        assert gate.get_daily_stats("agent1")["trade_count"] == 0
+
+        # Executor places the order (counts exactly once):
+        result = await executor.place_order(
+            self._order(), current_price=50000, current_price_timestamp=ts,
+        )
+        assert result.order_id == "12345"
+        assert gate.get_daily_stats("agent1")["trade_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_two_orders_consume_two_slots_third_rejected(self):
+        gate = self._gate(max_daily_trades=2)
+        executor = self._executor(gate)
+        ts = _fresh_ts()
+
+        for _ in range(2):
+            pre = gate.check_order(
+                self._order(), "agent1", current_price=50000,
+                current_price_timestamp=ts, count_trade=False,
+            )
+            assert pre.approved is True
+            result = await executor.place_order(
+                self._order(), current_price=50000, current_price_timestamp=ts,
+            )
+            assert result.order_id == "12345"
+
+        # Two real orders placed => exactly two slots consumed.
+        assert gate.get_daily_stats("agent1")["trade_count"] == 2
+
+        # Third order is rejected — not because the counter was inflated
+        # by pre-checks, but because the limit is genuinely reached.
+        assert gate.check_order(
+            self._order(), "agent1", current_price=50000,
+            current_price_timestamp=ts, count_trade=False,
+        ).code == "DAILY_TRADE_LIMIT_EXCEEDED"
+
+    @pytest.mark.asyncio
+    async def test_precheck_only_never_counts_and_phantom_default_never_grows(self):
+        """A blocked order (pre-check approved, order never reaches the
+        executor) must not consume a daily slot; and placing via the agent's
+        executor must never grow a phantom 'default' bucket."""
+        gate = self._gate(max_daily_trades=1)
+        executor = self._executor(gate)
+        ts = _fresh_ts()
+
+        pre = gate.check_order(
+            self._order(), "agent1", current_price=50000,
+            current_price_timestamp=ts, count_trade=False,
+        )
+        assert pre.approved is True
+        assert gate.get_daily_stats("agent1")["trade_count"] == 0
+
+        result = await executor.place_order(
+            self._order(), current_price=50000, current_price_timestamp=ts,
+        )
+        assert result.order_id == "12345"
+        assert gate.get_daily_stats("agent1")["trade_count"] == 1
+        # No phantom bucket: the executed order must NOT also appear under
+        # any other agent key (that was the pre-fix "default" inflation).
+        assert gate.get_daily_stats("default")["trade_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_unwind_admitted_when_daily_quota_exhausted_not_counted(self):
+        gate = self._gate(max_daily_trades=1)
+        executor = self._executor(gate)
+        ts = _fresh_ts()
+
+        # First ENTRY consumes the single daily slot.
+        result = await executor.place_order(
+            self._order(), current_price=50000, current_price_timestamp=ts,
+        )
+        assert result.order_id == "12345"
+        assert gate.get_daily_stats("agent1")["trade_count"] == 1
+
+        # A second entry is blocked at the limit.
+        with pytest.raises(ExecutionError, match="DAILY_TRADE_LIMIT_EXCEEDED"):
+            await executor.place_order(
+                self._order(), current_price=50000, current_price_timestamp=ts,
+            )
+
+        # A CLOSING leg (unwind=True — the mandatory flatten after a
+        # slippage-breach or partial fill) is admitted past the limit and does
+        # not consume a slot, mirroring the kill-switch admission.
+        unwind_order = OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="sell", order_type="market",
+            size="100", confidence_bps=8000, reduce_only=True, unwind=True,
+        )
+        result = await executor.place_order(
+            unwind_order, current_price=50000, current_price_timestamp=ts,
+        )
+        assert result.order_id == "12345"
+        assert gate.get_daily_stats("agent1")["trade_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_max_daily_trades_one_still_allows_one_order(self):
+        """Before the fix, the executor re-check always saw count >= 1 and
+        rejected every order at max_daily_trades == 1."""
+        gate = self._gate(max_daily_trades=1)
+        executor = self._executor(gate)
+        ts = _fresh_ts()
+
+        pre = gate.check_order(
+            self._order(), "agent1", current_price=50000,
+            current_price_timestamp=ts, count_trade=False,
+        )
+        assert pre.approved is True
+
+        result = await executor.place_order(
+            self._order(), current_price=50000, current_price_timestamp=ts,
+        )
+        assert result.order_id == "12345"
+        assert gate.get_daily_stats("agent1")["trade_count"] == 1
+
+
+class _InstrumentFakeCli:
+    """Fake CLI with configurable instrument metadata for unit-conversion tests."""
+
+    def __init__(self, ct_val="0.01", ct_val_ccy="BTC", inst_type="SWAP",
+                 order_state="filled", fill_px="50000"):
+        self.ct_val = ct_val
+        self.ct_val_ccy = ct_val_ccy
+        self.inst_type = inst_type
+        self.order_state = order_state
+        self.fill_px = fill_px
+        self.calls: list[tuple] = []
+
+    async def run(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        if args[0:2] == ("market", "instruments"):
+            # Real CLI shape (verified live): bare JSON array with --json.
+            lot = "0.01" if self.inst_type == "SWAP" else "0.00000001"
+            return [{
+                "instId": "BTC-USDT-SWAP", "instType": self.inst_type,
+                "ctVal": self.ct_val, "ctValCcy": self.ct_val_ccy,
+                "lotSz": lot, "minSz": lot,
+            }]
+        return {"data": [{
+            "ordId": "777", "clOrdId": "auto_fake", "state": self.order_state,
+            "accFillSz": "1", "fillPx": self.fill_px, "fillSz": "1",
+            "fillUsd": "500", "fee": "0.1", "feeCcy": "USDT",
+        }]}
+
+
+def _order_usd(size="500"):
+    return OrderRequest(
+        inst_id="BTC-USDT-SWAP", side="buy", order_type="market",
+        size=size, confidence_bps=7500, client_oid="conv1",
+    )
+
+
+class TestSizeUnitConversion:
+    """Regression: `--sz` on SWAP is contracts, not USDT. A $500 order passed
+    as `--sz 500` on BTC-USDT-SWAP (ctVal 0.01) meant 500 contracts =
+    $250,000 notional — a 500x error that bypassed every USD-based limit."""
+
+    @pytest.mark.asyncio
+    async def test_usd_converted_to_contracts_in_argv(self):
+        # $500 at $500 (ctVal 0.01 * 50000) per contract => exactly 1 contract.
+        cli = _InstrumentFakeCli(ct_val="0.01")
+        executor = OrderExecutor(cli=cli, risk_gate=RiskGate())
+        await executor.place_order(
+            _order_usd("500"), current_price=50000,
+            current_price_timestamp=_fresh_ts(),
+        )
+        order_args = next(a for a, _ in cli.calls if a[0:2] == ("trade", "order"))
+        assert order_args[order_args.index("--sz") + 1] == "1"
+
+    @pytest.mark.asyncio
+    async def test_usd_floored_to_lot_size_fractional_contracts_ok(self):
+        # $749 at $500/contract = 1.498 contracts; lotSz 0.01 -> 1.49.
+        # (Verified live: BTC-USDT-SWAP lotSz/minSz are 0.01 — fractional
+        # contracts are valid; whole-contract flooring was over-conservative.)
+        cli = _InstrumentFakeCli(ct_val="0.01")
+        executor = OrderExecutor(cli=cli, risk_gate=RiskGate())
+        await executor.place_order(
+            _order_usd("749"), current_price=50000,
+            current_price_timestamp=_fresh_ts(),
+        )
+        order_args = next(a for a, _ in cli.calls if a[0:2] == ("trade", "order"))
+        assert order_args[order_args.index("--sz") + 1] == "1.49"
+
+    @pytest.mark.asyncio
+    async def test_below_minimum_order_refused_not_rounded_up(self):
+        # $4 at $500/contract = 0.008 contracts < minSz 0.01 -> refuse.
+        cli = _InstrumentFakeCli(ct_val="0.01")
+        executor = OrderExecutor(cli=cli, risk_gate=RiskGate())
+        with pytest.raises(ExecutionError, match="below the"):
+            await executor.place_order(
+                _order_usd("4"), current_price=50000,
+                current_price_timestamp=_fresh_ts(),
+            )
+        # No order call ever reached the CLI.
+        assert not any(a[0:2] == ("trade", "order") for a, _ in cli.calls)
+
+    @pytest.mark.asyncio
+    async def test_no_reference_price_refuses_conversion(self):
+        # Fail-closed twice over: the gate rejects price-less orders
+        # (NO_PRICE_REFERENCE) and the converter would refuse too — an order
+        # sized in USD can never be submitted without a price either way.
+        cli = _InstrumentFakeCli(ct_val="0.01")
+        executor = OrderExecutor(cli=cli, risk_gate=RiskGate())
+        with pytest.raises(ExecutionError, match="price"):
+            await executor.place_order(_order_usd("500"))
+
+    @pytest.mark.asyncio
+    async def test_explicit_contracts_pass_through_untouched(self):
+        cli = _InstrumentFakeCli(ct_val="0.01")
+        executor = OrderExecutor(cli=cli, risk_gate=RiskGate())
+        order = OrderRequest(
+            inst_id="BTC-USDT-SWAP", side="buy", order_type="market",
+            size="3", size_unit="contracts", confidence_bps=7500,
+            client_oid="raw1",
+        )
+        await executor.place_order(
+            order, current_price=50000, current_price_timestamp=_fresh_ts(),
+        )
+        order_args = next(a for a, _ in cli.calls if a[0:2] == ("trade", "order"))
+        assert order_args[order_args.index("--sz") + 1] == "3"
+
+    @pytest.mark.asyncio
+    async def test_missing_instrument_metadata_fails_closed(self):
+        cli = _InstrumentFakeCli()
+        original = cli.run
+
+        async def no_instruments(*args, **kwargs):
+            if args[0:2] == ("market", "instruments"):
+                return []
+            return await original(*args, **kwargs)
+
+        cli.run = no_instruments
+        executor = OrderExecutor(cli=cli, risk_gate=RiskGate())
+        with pytest.raises(ExecutionError, match="metadata"):
+            await executor.place_order(
+                _order_usd("500"), current_price=50000,
+                current_price_timestamp=_fresh_ts(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_spot_converts_usd_to_base_amount(self):
+        cli = _InstrumentFakeCli(inst_type="SPOT")
+        executor = OrderExecutor(cli=cli, risk_gate=RiskGate(allowed_assets=["BTC-USDT"]))
+        order = OrderRequest(
+            inst_id="BTC-USDT", side="buy", order_type="market",
+            size="500", confidence_bps=7500, client_oid="spot1",
+        )
+        await executor.place_order(
+            order, current_price=50000, current_price_timestamp=_fresh_ts(),
+        )
+        order_args = next(a for a, _ in cli.calls if a[0:2] == ("trade", "order"))
+        assert order_args[order_args.index("--sz") + 1] == "0.01"  # 500/50000
+
+
+class TestOrderStatusMapping:
+    """Regression: OrderStatus(raw) raised ValueError on real OKX states
+    ("live", "canceled") — crashing the first live pending order query."""
+
+    def test_live_maps_to_pending(self):
+        assert OrderStatus.from_exchange("live") is OrderStatus.PENDING
+
+    def test_canceled_maps_to_cancelled_british_american(self):
+        assert OrderStatus.from_exchange("canceled") is OrderStatus.CANCELLED
+        assert OrderStatus.from_exchange("cancelled") is OrderStatus.CANCELLED
+
+    def test_partially_filled_mapped(self):
+        assert OrderStatus.from_exchange("partially_filled") is OrderStatus.PARTIALLY_FILLED
+
+    def test_unknown_state_never_raises(self):
+        assert OrderStatus.from_exchange("mmp_canceled") is OrderStatus.PENDING
+        assert OrderStatus.from_exchange("") is OrderStatus.PENDING
+        assert OrderStatus.from_exchange(None) is OrderStatus.PENDING
+
+
+class TestFillPolling:
+    """Regression: market SWAP orders usually return no fillPx synchronously;
+    without polling, fill verification returned None (inert) on most live
+    fills and the slippage collar/kill-switch trip never ran."""
+
+    @pytest.mark.asyncio
+    async def test_pending_order_polled_until_fill_px(self):
+        cli = _InstrumentFakeCli(order_state="live", fill_px=None)
+        poll_count = {"n": 0}
+
+        original = cli.run
+
+        async def run(*args, **kwargs):
+            if args[0:2] == ("trade", "order") and "--instId" not in args:
+                return {"data": [{
+                    "ordId": "888", "clOrdId": "auto", "state": "live",
+                    "accFillSz": "0", "fillPx": None, "fillSz": None,
+                    "fillUsd": None, "fee": "0", "feeCcy": "USDT",
+                }]}
+            # Order status query (order + --ordId): filled on the second poll.
+            if args[0:2] == ("trade", "order") and "--ordId" in args:
+                poll_count["n"] += 1
+                if poll_count["n"] >= 2:
+                    return {"data": [{
+                        "ordId": "888", "state": "filled", "accFillSz": "1",
+                        "fillPx": "50200", "fillSz": "1", "fillUsd": "502",
+                        "fee": "0.1", "feeCcy": "USDT",
+                    }]}
+                return {"data": [{
+                    "ordId": "888", "state": "live", "accFillSz": "0",
+                    "fillPx": None, "fillSz": None, "fillUsd": None,
+                    "fee": "0", "feeCcy": "USDT",
+                }]}
+            return await original(*args, **kwargs)
+
+        cli.run = run
+        executor = OrderExecutor(
+            cli=cli, risk_gate=RiskGate(max_slippage_pct=1.0),
+            fill_poll_attempts=3, fill_poll_delay=0.0,
+        )
+        result = await executor.place_order(
+            _order_usd("500"), current_price=50000,
+            current_price_timestamp=_fresh_ts(),
+        )
+        # fillPx 50200 vs ref 50000 = 0.4% — within collar, now verified.
+        assert result.fill_verified is True
+        assert poll_count["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_exhausted_polls_leave_unverified_never_good(self):
+        cli = _InstrumentFakeCli(order_state="live", fill_px=None)
+        original = cli.run
+
+        async def run(*args, **kwargs):
+            if args[0:2] == ("trade", "order") and "--ordId" not in args:
+                return {"data": [{
+                    "ordId": "889", "clOrdId": "auto", "state": "live",
+                    "accFillSz": "0", "fillPx": None, "fillSz": None,
+                    "fillUsd": None, "fee": "0", "feeCcy": "USDT",
+                }]}
+            if args[0:2] == ("trade", "order") and "--ordId" in args:
+                return {"data": [{
+                    "ordId": "889", "state": "live", "accFillSz": "0",
+                    "fillPx": None, "fillSz": None, "fillUsd": None,
+                    "fee": "0", "feeCcy": "USDT",
+                }]}
+            return await original(*args, **kwargs)
+
+        cli.run = run
+        executor = OrderExecutor(
+            cli=cli, risk_gate=RiskGate(),
+            fill_poll_attempts=2, fill_poll_delay=0.0,
+        )
+        result = await executor.place_order(
+            _order_usd("500"), current_price=50000,
+            current_price_timestamp=_fresh_ts(),
+        )
+        assert result.fill_verified is None  # not checked, not silently good

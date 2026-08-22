@@ -173,9 +173,34 @@ class OnchainLogger:
         private_key: str,
         chain_id: int = 1952,
     ):
-        self.w3 = Web(Web.HTTPProvider(rpc_url))
-        if not self.w3.is_connected():
-            raise ConnectionError(f"Cannot connect to X Layer RPC at {rpc_url}")
+        # Endpoint failover (roadmap Phase 1): the explicit primary first, then
+        # any independently configured fallback. First endpoint that answers
+        # wins; none answering raises.
+        from .rpc import rpc_urls
+
+        self.rpc_urls: list[str] = [rpc_url]
+        for url in rpc_urls():
+            if url not in self.rpc_urls:
+                self.rpc_urls.append(url)
+
+        # Probe via a local so the attribute is inferred as Web3 (not
+        # Web3 | None) once assigned — every method below uses it bare.
+        w3: Web | None = None
+        for url in self.rpc_urls:
+            candidate = Web(Web.HTTPProvider(url))
+            try:
+                if candidate.is_connected():
+                    w3 = candidate
+                    if url != self.rpc_urls[0]:
+                        logger.warning(f"Primary RPC unreachable; connected via fallback {url}")
+                    break
+            except Exception as e:
+                logger.warning(f"RPC endpoint {url} failed probe: {e}")
+        if w3 is None:
+            raise ConnectionError(
+                f"Cannot connect to any X Layer RPC endpoint ({', '.join(self.rpc_urls)})"
+            )
+        self.w3 = w3
         self.contract_address = Web.to_checksum_address(contract_address)
         self.private_key = private_key
         self.account = Account.from_key(private_key)
@@ -191,6 +216,26 @@ class OnchainLogger:
 
     def is_connected(self) -> bool:
         return self.w3.is_connected()
+
+    def _failover(self) -> bool:
+        """Switch self.w3 to the next configured endpoint. True on success.
+
+        Called only from the send path under the nonce lock, so swapping the
+        provider mid-flight cannot race a concurrent send.
+        """
+        current_url = getattr(self.w3.provider, "endpoint_uri", None)
+        for url in self.rpc_urls:
+            if url == current_url:
+                continue
+            candidate = Web(Web.HTTPProvider(url))
+            try:
+                if candidate.is_connected():
+                    logger.warning(f"Failing over X Layer RPC to {url}")
+                    self.w3 = candidate
+                    return True
+            except Exception as e:
+                logger.warning(f"Failover probe failed for {url}: {e}")
+        return False
 
     def get_nonce(self) -> int:
         """Node-reported transaction count. Kept for scripts/external callers;
@@ -250,7 +295,33 @@ class OnchainLogger:
                 "gasPrice": gas_price,
             })
             signed = self.w3.eth.account.sign_transaction(tx_data, self.private_key)
-            tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+            try:
+                tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+            except (ConnectionError, OSError) as e:
+                # Broadcast-level failure: the endpoint refused the connection
+                # itself. Fail over and retry ONCE — but only after checking the
+                # surviving node for the signed hash, because a lost response is
+                # not proof the tx never landed. Unknown state => never resend.
+                if not self._failover():
+                    raise
+                try:
+                    tx_hex = signed.hash.hex()
+                    if not tx_hex.startswith("0x"):
+                        tx_hex = "0x" + tx_hex
+                    prior = self.w3.eth.get_transaction_receipt(tx_hex)
+                    logger.warning(f"{label}: tx already mined on fallback node ({tx_hex})")
+                    tx_hash = prior["transactionHash"]
+                except Exception:
+                    self._nonce_counter = None  # reseed from the surviving node
+                    nonce = self._next_nonce()
+                    tx_data = func.build_transaction({
+                        "chainId": self.chain_id,
+                        "nonce": nonce,
+                        "gas": gas,
+                        "gasPrice": gas_price,
+                    })
+                    signed = self.w3.eth.account.sign_transaction(tx_data, self.private_key)
+                    tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
         receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
         if receipt.get("status") != 1:
             raise RuntimeError(f"{label} reverted on-chain (tx {tx_hash.hex()})")

@@ -10,7 +10,7 @@ Deployed on X Layer Testnet → Mainnet
 
 ```bash
 # Python backend
-cd Portfolio-risk-copilot
+cd AuditTrailTrader
 pip install -r requirements.txt
 python -m uvicorn src.main:app --reload --port 8000
 
@@ -120,12 +120,12 @@ npx hardhat run scripts/deploy.js --network xltestnet
 
 - [x] AI element: Multi-strategy signal generation + ensemble voting
 - [x] X Layer: Contract deployed, uses native USDC
-- [x] Dedicated X account: [@AuditTrailTrade](https://twitter.com/AuditTrailTrade)
+- [x] Dedicated X account: [@AuditTrailTrade](https://x.com/AuditTrailTrade)
 
 ## Files
 
 ```
-Portfolio-risk-copilot/
+AuditTrailTrader/
 ├── contracts/
 │   ├── contracts/TradeAuditTrail.sol     # Audit trail smart contract
 │   ├── artifacts/TradeAuditTrail_abi.json # Compiled ABI

@@ -4,7 +4,7 @@ Pre-signal data-integrity gate.
 Runs BEFORE signal generation, not between signal and execution. It catches
 bad inputs before they can ever produce a trade candidate -- a different
 failure mode from the risk gate's job of catching bad trades built on good
-inputs. In the copilot loop this means: a feed that has gone stale, a signal
+inputs. In the trading loop this means: a feed that has gone stale, a signal
 that was built on missing fields, a ledger whose book no longer reconciles, or
 a position that has outlived its intended window must each halt the cycle
 before any order is even considered.

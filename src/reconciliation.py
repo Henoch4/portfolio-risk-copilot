@@ -43,9 +43,9 @@ class ReconciliationResult:
 
 
 def _get_web3():
-    from web3 import Web3
-    rpc_url = os.getenv("XLAYER_RPC_URL", "https://xlayertestrpc.okx.com")
-    return Web3(Web3.HTTPProvider(rpc_url))
+    from .rpc import get_web3
+
+    return get_web3(default_primary="https://xlayertestrpc.okx.com")
 
 
 def _vault_contract(w3):

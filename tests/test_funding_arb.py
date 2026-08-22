@@ -25,6 +25,16 @@ class _StubCli:
 
     async def run(self, *args, **kwargs):
         cmd = args[:1]
+        if cmd == ("market",) and "instruments" in args:
+            inst_id = args[args.index("--instId") + 1] if "--instId" in args else ""
+            if inst_id.endswith("-SWAP"):
+                # ctVal 0.001 base at px 100 => $0.10/contract.
+                return {"data": [{"instId": inst_id, "instType": "SWAP",
+                                  "ctVal": "0.001", "ctValCcy": "BTC",
+                                  "lotSz": "0.001", "minSz": "0.001"}]}
+            return {"data": [{"instId": inst_id, "instType": "SPOT",
+                              "ctVal": "1", "ctValCcy": "BTC",
+                              "lotSz": "0.00000001", "minSz": "0.00000001"}]}
         if cmd == ("market",) and "trades" in args:
             return {"data": [{"px": "100", "sz": "1"}]}
         if cmd == ("market",) and "funding-rate" in args:

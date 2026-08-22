@@ -20,16 +20,16 @@
       "description": "Health check"
     },
     {
-      "path": "/audit-decisions",
+      "path": "/audit-stats",
       "method": "GET",
       "description": "Query onchain audit trail for decisions and executions"
+    },
+    {
+      "path": "/risk-stats",
+      "method": "GET",
+      "description": "Current daily risk statistics and kill-switch status"
     }
   ],
-  "pricing": {
-    "model": "pay_per_use",
-    "price_usd": "0.50",
-    "currency": "USDT"
-  },
   "permissions": [
     "trade:execute",
     "trade:place_order",

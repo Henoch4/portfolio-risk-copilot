@@ -49,7 +49,7 @@ class DurableDailyCounters:
         if path is None:
             path = os.environ.get("RISK_STATE_PATH", "").strip()
         if not path:
-            path = os.path.join(tempfile.gettempdir(), "portfolio-risk-copilot_risk_state.json")
+            path = os.path.join(tempfile.gettempdir(), "audittrailtrader_risk_state.json")
         self.path = path
         self._data = self._load()
         with self._LOCKS_GUARD:
@@ -100,6 +100,14 @@ class DurableDailyCounters:
             # Persistence failure is surfaced, not swallowed: if we can't write
             # the state file, the gate must not pretend the counters are saved.
             logger.error(f"DurableDailyCounters: failed to persist to {self.path}: {e}")
+            from ..alerting import send_alert
+
+            send_alert(
+                "RISK_STATE_WRITE_FAILED",
+                "critical",
+                f"Daily counters NOT persisted to {self.path}: {e}. "
+                "A process restart now resets today's loss/trade totals.",
+            )
 
     def get(self, key: str, field: str, default):
         if not self.enabled or not self._lock:
@@ -362,17 +370,38 @@ class RiskGate:
         prefix = f"{agent_id}:"
         return sorted(k for k in self._daily_volume if k.startswith(prefix))
 
+    def current_day_key(self, agent_id: str) -> str:
+        """Public accessor so a caller can pin loss/volume attribution to the
+        UTC day its cycle STARTED in (see report_loss's day_key param) —
+        otherwise a cycle straddling midnight books its losses to the fresh
+        day and the prior day's limit never registers the breach."""
+        return self._day_key(agent_id)
+
     def activate_kill_switch(self, reason: str) -> None:
         """Halt all order approval immediately. Requires explicit deactivation to resume."""
         self._kill_switch_active = True
         self._kill_switch_reason = reason
         self._kill_switch_activated_at = time.time()
+        from ..alerting import send_alert
+
+        send_alert(
+            "KILL_SWITCH_ACTIVATED",
+            "critical",
+            f"Trading halted. Reason: {reason}",
+        )
 
     def deactivate_kill_switch(self) -> None:
         """Resume order approval. This is a deliberate, separate action — never automatic."""
         self._kill_switch_active = False
         self._kill_switch_reason = None
         self._kill_switch_activated_at = None
+        from ..alerting import send_alert
+
+        send_alert(
+            "KILL_SWITCH_DEACTIVATED",
+            "warning",
+            "Trading resumed by explicit deactivation.",
+        )
 
     def kill_switch_status(self) -> dict:
         return {
@@ -466,6 +495,7 @@ class RiskGate:
         current_price_timestamp: float | None = None,
         current_position_side: str | None = None,
         unwind: bool = False,
+        count_trade: bool = True,
     ) -> RiskCheckResult:
         """
         Check an order against all risk parameters.
@@ -579,9 +609,14 @@ class RiskGate:
                 ),
             )
 
-        # 4. Daily trade count
+        # 4. Daily trade count. Closing legs of a multi-leg package (unwind,
+        # sent by the resolvers to flatten a partial fill or slippage breach)
+        # are ADMITTED past the daily limit — same principle as the kill-switch
+        # admission below. By the time a package needs to unwind, the fill that
+        # created the exposure has already consumed a daily slot; refusing the
+        # unwind at the limit would strand a naked leg.
         key = self._day_key(agent_id)
-        if self._daily_trade_count.get(key, 0) >= self.max_daily_trades:
+        if not unwind and self._daily_trade_count.get(key, 0) >= self.max_daily_trades:
             return RiskCheckResult(
                 approved=False,
                 code="DAILY_TRADE_LIMIT_EXCEEDED",
@@ -710,24 +745,45 @@ class RiskGate:
         #     reset this agent's tally against max_daily_trades. The store write
         #     is atomic (temp+replace); a crash between the in-memory bump and
         #     the store write is harmless because recovery reads the store first.
-        count = self._daily_trade_count.get(key, 0) + 1
-        self._daily_trade_count[key] = count
-        self._counters.increment(key, "trade_count", 1)
+        #
+        # count_trade=False marks a PRE-flight gate check (an agent re-checking
+        # the same order it will hand to the executor). One logical order is
+        # checked twice — once by the agent's cycle (agent.py Phase 3, funding
+        # arb proposal) and once inside OrderExecutor.place_order just before
+        # submission. Before count_trade existed, every approved check
+        # incremented a daily counter: the agent's pre-flights charged the
+        # agent's OWN quota for orders that might never execute (onchain log
+        # failure, rejected submission, aborted arb package — and a funding-arb
+        # proposal charged 2 slots at proposal time), while the executor's
+        # re-check wrote a separate "default" bucket that is never reported or
+        # enforced. Only the final pre-submission check — the one inside
+        # OrderExecutor.place_order — counts the trade, once. Closing legs
+        # (unwind) are never entry activity: they do not consume the daily
+        # trade quota at all.
+        if count_trade and not unwind:
+            count = self._daily_trade_count.get(key, 0) + 1
+            self._daily_trade_count[key] = count
+            self._counters.increment(key, "trade_count", 1)
         return RiskCheckResult(
             approved=True,
             code="APPROVED",
             reason="All checks passed",
         )
 
-    def report_loss(self, agent_id: str, loss_usd: float):
+    def report_loss(self, agent_id: str, loss_usd: float, day_key: str | None = None):
         """Report a loss to the daily loss tracker.
 
         Auto-trips the kill switch if this loss pushes the agent over its daily
         loss limit — the design doc's fail-safe-defaults principle (Section 4)
         says the system should default to reducing risk under uncertainty, not
         just reject the next single order and otherwise carry on.
+
+        day_key: pin attribution to the UTC day the trading cycle STARTED in
+        (capture via current_day_key() at cycle start). Without it, a cycle
+        straddling midnight UTC books post-midnight fills to the fresh day —
+        the prior day's limit never sees the breach.
         """
-        key = self._day_key(agent_id)
+        key = day_key or self._day_key(agent_id)
         loss = self._daily_loss.get(key, 0.0) + loss_usd
         self._daily_loss[key] = loss
         self._counters.increment(key, "loss", loss_usd)
@@ -740,9 +796,10 @@ class RiskGate:
                 )
             )
 
-    def report_volume(self, agent_id: str, volume_usd: float):
-        """Report executed volume to the daily tracker."""
-        key = self._day_key(agent_id)
+    def report_volume(self, agent_id: str, volume_usd: float, day_key: str | None = None):
+        """Report executed volume to the daily tracker (same day_key pinning
+        semantics as report_loss)."""
+        key = day_key or self._day_key(agent_id)
         vol = self._daily_volume.get(key, 0.0) + volume_usd
         self._daily_volume[key] = vol
         self._counters.increment(key, "volume", volume_usd)

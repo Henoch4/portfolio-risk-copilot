@@ -1,7 +1,7 @@
 # External-User Strategy: Pooled Vault + Depositor UI
 
 **Status:** DESIGN — proposal for review, no code written.
-**Scope:** `Portfolio-risk-copilot` (AuditTrail Trader). This is *not* the
+**Scope:** `AuditTrailTrader` (AuditTrail Trader). This is *not* the
 `sibling private-vault-nox` FXRP vault — that project solves XRP-on-Flare
 privacy. This document is about wrapping the existing OKX trading agent in a
 pooled capital vault so external users can deposit, watch, and withdraw.

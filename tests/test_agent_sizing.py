@@ -95,3 +95,31 @@ class TestKellySizing:
     def test_kelly_fraction_zero_disables_orders(self):
         # Safety: fraction 0 means never risk capital.
         assert _agent(kelly_fraction=0.0)._compute_order_size(_signal(9500)) == 0.0
+
+class TestSignalToOrderReduceOnly:
+    """Regression: SHORT entries were built with reduce_only=True ('shorts
+    reduce long positions'), which OKX rejects on an entry — the agent could
+    open longs but never actually short. Entries are never reduce-only;
+    reduction happens via the unwind path."""
+
+    def test_short_entry_is_not_reduce_only(self):
+        sig = Signal(
+            strategy="mean_reversion", asset="BTC-USDT-SWAP",
+            direction="SHORT", confidence_bps=7500, entry_price=100.0,
+            rationale="test",
+        )
+        order = _agent()._signal_to_order(sig, {"position": None})
+        assert order is not None
+        assert order.side == "sell"
+        assert order.reduce_only is False
+
+    def test_long_entry_is_not_reduce_only(self):
+        sig = Signal(
+            strategy="mean_reversion", asset="BTC-USDT-SWAP",
+            direction="LONG", confidence_bps=7500, entry_price=100.0,
+            rationale="test",
+        )
+        order = _agent()._signal_to_order(sig, {"position": None})
+        assert order is not None
+        assert order.side == "buy"
+        assert order.reduce_only is False

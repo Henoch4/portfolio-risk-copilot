@@ -5,7 +5,7 @@ profile name, validated against the allowlist. Includes cooldown and
 automatic revert-on-underperformance so "advisory-only" is a checkable,
 enforced mechanism rather than a promise.
 
-Profiles live in config/profiles.yaml under the copilot's risk-gate
+Profiles live in config/profiles.yaml under the trader's risk-gate
 vocabulary (confidence floors in bps, position-size multiplier, max
 leverage, enabled signal set).
 

@@ -1,0 +1,76 @@
+# AuditTrail Trader - Architecture Diagram
+
+## Mermaid Source (`.mmd`)
+
+```mermaid
+graph LR
+    %% Main flow
+    A[Market Data Fetch] --> B[Signal Engine]
+    B --> C[Risk Gate]
+    C -->|approved| D[Onchain Logger]
+    C -->|rejected| E[Blocked / Return to Agent]
+    D -->|logDecision| F[X Layer: TradeAuditTrail.sol]
+    F -->|executeOrder| G[OKX CLI / Order Execution]
+    G --> H[Order Filled / Partial / Cancelled]
+
+    %% Governance modules as subgraph
+    subgraph Governance["Governance Layers (Ported from sibling MVP)"]
+        G1[Data Integrity Gate<br>--- Staleness > 30s → HARD BLOCK<br>--- NaN funding_rate → HARD BLOCK<br>--- Ledger drift > 0.5% → HARD BLOCK<br>--- Orphaned positions → HARD BLOCK]
+        G2[Curator Profile Selector<br>--- Fixed allowlist (conservative/standard/defensive)<br>--- Cooldown: 12 cycles between switches<br>--- Auto-revert on underperformance<br>--- Drawdown circuit breaker forces "defensive"]
+        G3[Multi-Leg Execution Manager<br>--- State machine: PENDING_FILL → LOCKED → SETTLED<br>--- ABORTED on partial fill or slippage breach<br>--- Per-leg max_slippage_pct enforced (0.3%)<br>--- PaperFillSimulator: no min cap on slippage<br>--- LiveFillSimulator: real orders through OrderExecutor]
+        G4[Strategy Validation<br>--- Walk-forward windows (6 folds)<br>--- PBO (Probability of Backtest Overfitting) ≤ 0.5<br>--- Calmar Ratio ≥ 1.0 AND Sharpe ratio<br>--- Cleared for paper trading boolean gate]
+        G5[Local Append-Only Audit Log<br>--- JSONL file: audit_log.jsonl<br>--- Records: integrity blocks, curator switches, risk rejections<br>--- Complements on-chain audit trail]
+    end
+
+    %% Connections from main flow to governance
+    C -->|non-overridable gate| G1
+    G1 -->|HARD BLOCK| G2
+    G2 -->|profile selector| G3
+    G3 -->|risk-checked dispatch| G4
+    G4 -->|cleared_for_paper_trading| G5
+
+    %% Styling
+    classDef main fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#000;
+    classDef governance fill:#f1f8e9,stroke:#558b2f,stroke-width:2px,color:#000;
+    classDef block fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#000;
+    classDef allow fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000;
+
+    class A,B,D,G,H main;
+    class G1,G2,G3,G4,G5 governance;
+    class C,E block;
+</graph>
+```
+
+## Rendered Output
+
+| Artifact | Location | Description |
+|----------|----------|-------------|
+| `audit-trail-trader.svg` | `docs/audit-trail-trader.svg` | Crisp vector diagram for docs/blog posts |
+| `audit-trail-trader.png` | `docs/audit-trail-trader.png` | Raster image for Twitter, presentations |
+| `audit-trail-trader.mmd` | `docs/audit-trail-trader.mmd` | Mermaid source — editable in any editor |
+| `audit-trail-trader.excalidraw` | `docs/audit-trail-trader.excalidraw` | Editable scene at <https://excalidraw.com> |
+
+> **To regenerate:** Run the diagram skill with the `.mmd` source, or open the `.excalidraw` file at excalidraw.com and edit nodes/arrows — I can re-render from the edited scene.
+
+## Twitter / Thread-Friendly Description (copy-paste)
+
+> ⚙️ Building an AI trader that can't bypass its own risk controls.
+> 
+> Most AI trading systems: "Trade first, ask questions never." ❌
+> 
+> This project: "Risk gate first, log always." ✅
+> 
+> The **Risk Gate** sits between the AI signal generator and execution layer. The AI **cannot** bypass position limits, daily loss limits, or confidence thresholds. It's the Wall Street principle made code.
+> 
+> Five governance modules, wired into the loop:
+> 1️⃣ Pre-signal data integrity — catches stale/NaN feeds **before** signal generation
+> 2️⃣ Curator profile selector — allowlist, cooldown, auto-revert on underperformance
+> 3️⃣ Atomic multi-leg execution — delta-neutral packages with enforced slippage limits
+> 4️⃣ Strategy validation — walk-forward, PBO, Calmar/Sharpe gates (Calmar ≥ 1.0 AND PBO ≤ 0.5)
+> 5️⃣ Local append-only audit log — JSONL recording every governance decision
+> 
+> Every decision is signed with EIP-191 and submitted to **TradeAuditTrail.sol on X Layer****before** the order hits OKX. If logging fails, trading is blocked.
+> 
+> **343 tests, fully offline. No network needed.**
+> 
+> GitHub: <https://github.com/Henoch4/AuditTrailTrader>

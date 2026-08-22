@@ -274,6 +274,14 @@ contract TradeAuditTrail {
         uint256 idx = decisionIndex[decisionId];
         TradeDecision storage d = decisions[idx];
         require(d.decisionId == decisionId, "decision mismatch");
+        // Authorization: an execution receipt is a claim about how the
+        // decision's OWN trade actually filled. The `onlyAgent` modifier alone
+        // only proves the caller is an EOA (msg.sender == tx.origin) — it does
+        // not prove that caller owns this decision. Without this check any EOA
+        // could forge a fill on any agent's logged decision (poisoning the
+        // audit trail) and permanently block the real agent's later receipt
+        // via the "execution already recorded" guard.
+        require(d.agent == msg.sender, "not decision owner");
 
         d.executed = true;
         decisionExecuted[decisionId] = true;

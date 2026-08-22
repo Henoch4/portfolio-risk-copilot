@@ -2,7 +2,7 @@
 # The curator selects a NAME from this file. It never writes raw parameters.
 # Any name the curator emits that isn't a key here is rejected, not coerced.
 #
-# Adapted from the trading_system MVP profiles to the copilot's risk-gate
+# Adapted from the trading_system MVP profiles to the trader's risk-gate
 # vocabulary: confidence floors are in basis points (bps, 0..10000) to match
 # RiskGate.min_confidence_bps and Signal.confidence_bps.
 

@@ -72,3 +72,19 @@ def test_gas_estimate_fallback_on_revert():
     logger._send_transaction(lambda: func, "Risk params set")
     tx_dict = func.build_transaction.call_args.args[0]
     assert tx_dict["gas"] == 300_000  # safe fallback, not the capped estimate
+
+
+def test_chain_id_flows_from_logger_into_build_transaction():
+    """The chain id used for the real transaction must be the logger's own
+    chain_id — the property tests/test_chain_id_consistency.py cannot verify
+    by string-matching "1952" across source files (that only proves defaults
+    agree; a hardcoded literal in _send_transaction would still pass).
+
+    Uses a NON-default chain_id so the assertion cannot pass vacuously: if
+    _send_transaction hardcoded the default ("1952") instead of reading
+    self.chain_id, this test fails."""
+    logger, func = _make_logger()
+    logger.chain_id = 1953
+    logger._send_transaction(lambda: func, "Risk params set")
+    tx_dict = func.build_transaction.call_args.args[0]
+    assert tx_dict["chainId"] == 1953

@@ -43,6 +43,7 @@ from .audit_trail import AuditLog
 from .curator import CuratorAgent, apply_env_overrides
 from .data_integrity import DataIntegrityGate, IntegrityResult, MarketTick, Severity
 from .multi_leg import MultiLegExecutionManager, Step, LiveFillSimulator, PackageState
+from .reconciliation import read_okx_balance
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,7 @@ class AutonomousTradingAgent:
         expected_equity: float | None = None,
         multi_leg_manager: MultiLegExecutionManager | None = None,
         funding_arb_min_rate: float = 0.001,
+        regime_filter_window: int = 0,
     ):
         self.cli = okx_cli
         self.risk_gate = risk_gate
@@ -104,6 +106,12 @@ class AutonomousTradingAgent:
         # Off by default — see _generate_signals docstring. Momentum is a
         # phase-2+ strategy per the design doc's Section 0 MVP scope.
         self.enable_momentum = enable_momentum
+
+        # Structural-trend guard (roadmap Phase 2 regime filter): suppresses
+        # mean-reversion LONGs in sustained downtrends (and vice versa) and
+        # requires momentum crossovers to agree with the longer horizon.
+        # 0 disables. main.py wires REGIME_FILTER_WINDOW (default 50).
+        self.regime_filter_window = regime_filter_window
 
         # The delta-neutral funding-arbitrage package machinery. When a
         # manager is wired, an asset whose funding rate clears
@@ -134,6 +142,7 @@ class AutonomousTradingAgent:
             cli=okx_cli,
             risk_gate=risk_gate,
             dry_run=dry_run,
+            agent_id=agent_id,
         )
 
         # Concurrency guards for the shared, mutable pieces touched inside the
@@ -147,6 +156,12 @@ class AutonomousTradingAgent:
         # Track open positions for this agent
         self._open_positions: dict[str, dict] = {}
         self._daily_pnl: float = 0.0
+
+        # Equity-delta loss feed (roadmap Phase 1: the daily-loss limit must be
+        # fed by reality, not left inert). Holds the last observed OKX total
+        # equity; a negative delta between consecutive live cycles is reported
+        # to the risk gate as a realized loss. None = no baseline yet.
+        self._last_cycle_equity: float | None = None
 
     async def _fetch_market_data(self, asset: str, lookback: int = 50) -> dict:
         """Fetch market data: price history, funding rate, current position."""
@@ -295,23 +310,31 @@ class AutonomousTradingAgent:
         Also note: funding_rate_signal below is a directional contrarian bet
         on funding-rate extremes reverting — it is NOT the delta-neutral
         long-spot/short-perp funding arbitrage described in the design doc's
-        Section 0 thesis. That strategy requires a two-leg hedged position
-        this executor doesn't place. Until that's built, this signal carries
-        real directional risk and should be sized and reasoned about
-        accordingly, not treated as market-neutral.
+        Section 0 thesis. That two-leg hedged package IS implemented
+        separately (_run_funding_arb_package + multi_leg.py) and runs instead
+        of this signal when FUNDING_ARB_MIN_RATE is met; this naive signal
+        still carries real directional risk whenever it fires outside that
+        path and should be sized and reasoned about accordingly, not treated
+        as market-neutral.
         """
         prices = self._extract_prices(market_data)
         price_data = self._extract_price_data(market_data)
         funding_rate = market_data.get("funding_rate", 0.0)
 
         signals = [
-            mean_reversion_signal(asset, prices, window=20, z_threshold=2.0),
+            mean_reversion_signal(
+                asset, prices, window=20, z_threshold=2.0,
+                regime_window=self.regime_filter_window,
+            ),
             funding_rate_signal(asset, funding_rate, threshold=0.001),
         ]
 
         if self.enable_momentum:
             signals.append(
-                momentum_signal(asset, price_data, short_window=5, long_window=20)
+                momentum_signal(
+                    asset, price_data, short_window=5, long_window=20,
+                    regime_window=self.regime_filter_window,
+                )
             )
 
         # Curator profile's enabled-signal allowlist: strategies not in the
@@ -392,7 +415,11 @@ class AutonomousTradingAgent:
             order_type="market",
             size=f"{order_size:.2f}",
             client_oid=f"signal_{signal.strategy}_{uuid.uuid4().hex[:8]}",
-            reduce_only=(signal.direction == "SHORT"),  # shorts reduce long positions
+            # Entries are never reduce-only: reduceOnly on a SHORT entry is
+            # rejected by OKX (or silently reduces an existing long instead
+            # of opening the modeled short). Position reduction happens via
+            # the unwind path, not by mislabeling entries.
+            reduce_only=False,
             confidence_bps=signal.confidence_bps,
         )
 
@@ -516,11 +543,17 @@ class AutonomousTradingAgent:
                 current_price=perp_price,
                 current_price_timestamp=perp_timestamp,
                 current_position_side=(md.get("position") or {}).get("side"),
+                # Pre-flight only: the executor re-checks and counts each leg
+                # at submission (place_order). Counting here would charge the
+                # agent's daily quota for two orders at proposal time —
+                # before either leg is dispatched, even if the package aborts.
+                count_trade=False,
             ),
             self.risk_gate.check_order(
                 spot_order, self.agent_id,
                 current_price=spot_price,
                 current_price_timestamp=spot_timestamp,
+                count_trade=False,
             ),
         ]
         for check in checks:
@@ -686,6 +719,10 @@ class AutonomousTradingAgent:
             cycle_id=cycle_id,
             timestamp=time.time(),
         )
+        # Pin loss attribution to the UTC day this cycle STARTED in, so a
+        # cycle straddling midnight books its losses against the day whose
+        # limits approved the trades (see RiskGate.report_loss).
+        cycle_day_key = self.risk_gate.current_day_key(self.agent_id)
 
         # Resolve the curator profile for this cycle ONCE, before any market
         # data is fetched — its knobs (sizing multiplier, confidence floor,
@@ -731,7 +768,58 @@ class AutonomousTradingAgent:
             result.executions.extend(out["executions"])
             result.errors.extend(out["errors"])
 
+        await self._report_cycle_loss(cycle_day_key)
         return result
+
+    async def _report_cycle_loss(self, cycle_day_key: str) -> None:
+        """Feed the daily-loss limit from real account movement.
+
+        Equity-delta model: compare OKX total equity against the previous
+        live cycle's reading; a negative delta is reported to the risk gate
+        as a realized loss pinned to this cycle's UTC day. This is what makes
+        max_daily_loss_usd (and its auto-kill-switch) actually bite — before
+        this, nothing in production ever called report_loss.
+
+        Disabled in dry-run: there is no real account to read, and simulated
+        deltas would trip a kill switch that protects nothing.
+        """
+        if self.dry_run:
+            return
+        try:
+            balance = await read_okx_balance(self.cli)
+        except Exception as e:  # noqa: BLE001 — a failed read must never kill the cycle
+            logger.warning(f"Equity-delta loss feed: balance read failed: {e}")
+            return
+        equity = balance.get("total_eq") if isinstance(balance, dict) else None
+        if not isinstance(equity, (int, float)) or equity <= 0:
+            logger.warning("Equity-delta loss feed: no usable total_eq in balance snapshot")
+            return
+        equity = float(equity)
+        # The read-modify-write of _last_cycle_equity AND the loss report run
+        # in one critical section: two concurrent /trade cycles interleaving
+        # here would each see a different prev and under/over-report the
+        # day's loss (TOCTOU on the baseline). Only the network read stays
+        # outside the lock so the critical section is pure memory work.
+        async with self._risk_lock:
+            prev = self._last_cycle_equity
+            self._last_cycle_equity = equity
+            if prev is not None:
+                delta = equity - prev
+                if delta < 0:
+                    self.risk_gate.report_loss(self.agent_id, -delta, day_key=cycle_day_key)
+                    reported = True
+                else:
+                    reported = False
+            else:
+                delta = 0.0
+                reported = False
+        if prev is None:
+            logger.info(f"Equity-delta loss feed: baseline set at ${equity:.2f}")
+        elif reported:
+            logger.warning(
+                f"Equity fell ${-delta:.2f} since last cycle — reported to risk gate "
+                f"(pinned to {cycle_day_key})"
+            )
 
     async def _process_asset(self, md: dict, cycle_id: str, result: "TradingCycleResult") -> dict:  # noqa: F821
         """Run the full per-asset pipeline for one market-data snapshot.
@@ -818,6 +906,11 @@ class AutonomousTradingAgent:
                 current_price=current_price,
                 current_price_timestamp=md.get("timestamp"),
                 current_position_side=current_position_side,
+                # Pre-flight only — the executor re-checks and counts the order
+                # at submission (place_order). A pre-flight count here would
+                # charge the agent's own daily quota for an order that may
+                # never execute (onchain log failure, rejected submission).
+                count_trade=False,
             )
         if not risk_result.approved:
             out["errors"].append(f"Risk gate rejected {asset}: {risk_result.reason}")

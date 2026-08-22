@@ -1,5 +1,5 @@
 """
-Risk-audit logic for the Portfolio Risk Copilot ASP.
+Risk-audit logic for the AuditTrail Trader ASP.
 
 Two entry points:
   1. run_audit()        -- CLI-based (local testing, needs OKX credentials)

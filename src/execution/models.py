@@ -28,6 +28,26 @@ class OrderStatus(Enum):
     CANCELLED = "cancelled"
     REJECTED = "rejected"
 
+    # OKX REST/CLI order states are: "live", "partially_filled", "filled",
+    # "canceled". Anything else (e.g. "mmp_canceled" on MMP-triggered halts)
+    # is treated as pending — never crash the executor on an unmapped state;
+    # a wrong-but-alive reading beats a ValueError mid-trade.
+    @classmethod
+    def from_exchange(cls, state: str) -> "OrderStatus":
+        exchange_map = {
+            "live": cls.PENDING,
+            "partially_filled": cls.PARTIALLY_FILLED,
+            "filled": cls.FILLED,
+            "canceled": cls.CANCELLED,
+            "cancelled": cls.CANCELLED,
+            "rejected": cls.REJECTED,
+        }
+        mapped = exchange_map.get((state or "").strip().lower())
+        if mapped is None:
+            logger.warning("Unmapped OKX order state %r — treating as PENDING", state)
+            return cls.PENDING
+        return mapped
+
 
 @dataclass
 class OrderRequest:
@@ -35,7 +55,13 @@ class OrderRequest:
     inst_id: str           # e.g. "BTC-USDT-SWAP"
     side: OrderSide        # "buy" or "sell"
     order_type: OrderType  # "market" or "limit"
-    size: str              # order size in quote currency (USDT)
+    size: str              # order size, interpreted per size_unit
+    # Units of `size`. "usd" (default): notional in quote currency (USDT) —
+    # the executor converts to exchange-native units (SWAP contracts / SPOT
+    # base ccy) before submitting, using instrument ctVal metadata and the
+    # reference price. "contracts"/"base_ccy": size is already in exchange
+    # units and is passed through untouched.
+    size_unit: Literal["usd", "contracts", "base_ccy"] = "usd"
     px: str | None = None  # limit price (optional for market orders)
     time_in_force: TimeInForce = "gtc"
     client_oid: str | None = None  # custom order ID for tracking
